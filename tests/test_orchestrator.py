@@ -11,7 +11,6 @@ def result(
     next_state: str,
     questions: list[str] | None = None,
     challenge_round: int | None = None,
-    scope_changed: bool | None = None,
 ) -> dict:
     value = {
         "summary": "A validated result.",
@@ -24,8 +23,6 @@ def result(
     }
     if challenge_round is not None:
         value["requirements_challenge_round"] = challenge_round
-    if scope_changed is not None:
-        value["requirements_scope_changed"] = scope_changed
     return value
 
 
@@ -195,7 +192,6 @@ class IssueOrchestratorTests(unittest.TestCase):
             result(
                 next_state="needs-requirements-challenge",
                 challenge_round=1,
-                scope_changed=False,
             ),
             challenge_result(1),
         )
@@ -229,13 +225,11 @@ class IssueOrchestratorTests(unittest.TestCase):
             result(
                 next_state="needs-requirements-challenge",
                 challenge_round=1,
-                scope_changed=False,
             ),
             challenge_result(1),
             result(
                 next_state="needs-requirements-challenge",
                 challenge_round=2,
-                scope_changed=True,
             ),
             challenge_result(2),
         )
@@ -253,7 +247,6 @@ class IssueOrchestratorTests(unittest.TestCase):
             result(
                 next_state="needs-requirements-challenge",
                 challenge_round=2,
-                scope_changed=True,
             )
         )
         self.assertEqual(orchestrator.run_once().status, "failed")

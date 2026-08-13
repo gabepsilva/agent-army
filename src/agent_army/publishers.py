@@ -156,6 +156,39 @@ def _reject_placeholder_text(field: str, text: str, *, min_length: int) -> None:
         )
 
 
+def _validate_responses(
+    result: dict[str, Any], open_findings: list[dict[str, Any]] | None = None
+) -> None:
+    """The accept-or-dispute contract, shared by whoever is answering findings.
+
+    Silent compliance and silent omission are both rejected: convergence
+    requires taking a position, not deferring.
+    """
+    responses = result.get("responses") or []
+    known_ids = {str(finding["id"]) for finding in (open_findings or [])}
+    seen: set[str] = set()
+    for response in responses:
+        finding_id = str(response["finding_id"])
+        if open_findings is not None and finding_id not in known_ids:
+            raise ValueError(f"Responded to an unknown finding: {finding_id}")
+        if finding_id in seen:
+            raise ValueError(f"Responded twice to finding {finding_id}.")
+        seen.add(finding_id)
+        if response["disposition"] not in DEVELOPER_DISPOSITIONS:
+            raise ValueError("A finding disposition must be accepted or disputed.")
+        _reject_placeholder_text(
+            "response rationale", response["rationale"], min_length=_MIN_LIST_ITEM_LENGTH
+        )
+        if response["disposition"] == "disputed" and not _is_recheckable(response["rationale"]):
+            raise ValueError(
+                f"Disputing finding {finding_id} requires re-checkable evidence "
+                "(a file:line, a `command`, or a URL)."
+            )
+    for finding in open_findings or []:
+        if finding.get("severity") == BLOCKING and str(finding["id"]) not in seen:
+            raise ValueError(f"Must accept or dispute blocking finding {finding['id']}.")
+
+
 def validate_analysis_result(result: dict[str, Any]) -> None:
     missing = REQUIRED_RESULT_FIELDS - result.keys()
     if missing:
@@ -193,10 +226,15 @@ def render_documentation_analysis(result: dict[str, Any]) -> str:
 
 
 def validate_orchestration_result(
-    result: dict[str, Any], role: str, *, prior_challenge_round: int | None = None
+    result: dict[str, Any],
+    role: str,
+    *,
+    prior_challenge_round: int | None = None,
+    open_findings: list[dict[str, Any]] | None = None,
 ) -> None:
     """Validate the small result contract used by the polling orchestrator."""
     validate_analysis_result(result)
+    _validate_responses(result, open_findings)
     next_state = result.get("next_state")
     if next_state not in PROJECT_OWNER_STATES:
         raise ValueError("Orchestrator result next_state must be a Project Owner workflow label.")
@@ -205,26 +243,21 @@ def validate_orchestration_result(
 
     if role == "project-owner":
         challenge_round = result.get("requirements_challenge_round")
-        scope_changed = result.get("requirements_scope_changed")
         if next_state == "needs-requirements-challenge":
-            if not isinstance(challenge_round, int) or challenge_round not in {1, 2}:
-                raise ValueError(
-                    "Requirements challenge routing must specify round 1 or round 2."
-                )
-            if not isinstance(scope_changed, bool):
-                raise ValueError(
-                    "Requirements challenge routing must specify whether scope materially changed."
-                )
+            if not isinstance(challenge_round, int) or challenge_round < 1:
+                raise ValueError("Requirements challenge routing must specify its round.")
             expected_round = 1 if prior_challenge_round is None else prior_challenge_round + 1
             if challenge_round != expected_round:
                 raise ValueError("Requirements challenge round is not the next allowed round.")
-            if challenge_round == 1 and scope_changed:
-                raise ValueError("The initial requirements challenge cannot claim a scope revision.")
-            if challenge_round == 2 and not scope_changed:
-                raise ValueError("A follow-up requirements challenge requires a material scope change.")
-        elif challenge_round is not None or scope_changed is not None:
+        elif challenge_round is not None:
             raise ValueError(
                 "Requirements challenge metadata is only valid when routing to its workflow state."
+            )
+        if next_state == "needs-design-signoff" and not str(
+            result.get("final_design") or ""
+        ).strip():
+            raise ValueError(
+                "Routing to design sign-off requires the converged design in final_design."
             )
         if next_state == "needs-user-guidance" and len(result["questions"]) != 1:
             raise ValueError(
@@ -261,32 +294,7 @@ def validate_developer_result(
     if result["status"] == "completed" and result["questions"]:
         raise ValueError("A completed Developer result cannot leave an unresolved question.")
 
-    responses = result.get("responses") or []
-    known_ids = {str(finding["id"]) for finding in (open_findings or [])}
-    seen: set[str] = set()
-    for response in responses:
-        finding_id = str(response["finding_id"])
-        if open_findings is not None and finding_id not in known_ids:
-            raise ValueError(f"Developer responded to an unknown finding: {finding_id}")
-        if finding_id in seen:
-            raise ValueError(f"Developer responded twice to finding {finding_id}.")
-        seen.add(finding_id)
-        if response["disposition"] not in DEVELOPER_DISPOSITIONS:
-            raise ValueError("Developer finding disposition must be accepted or disputed.")
-        _reject_placeholder_text(
-            "response rationale", response["rationale"], min_length=_MIN_LIST_ITEM_LENGTH
-        )
-        if response["disposition"] == "disputed" and not _is_recheckable(response["rationale"]):
-            raise ValueError(
-                f"Disputing finding {finding_id} requires re-checkable evidence "
-                "(a file:line, a `command`, or a URL)."
-            )
-
-    for finding in open_findings or []:
-        if finding.get("severity") == BLOCKING and str(finding["id"]) not in seen:
-            raise ValueError(
-                f"Developer must accept or dispute blocking finding {finding['id']}."
-            )
+    _validate_responses(result, open_findings)
 
 
 def _validate_findings(
@@ -450,10 +458,7 @@ def render_orchestration_result(
         f"from={source_state} next={next_state}"
     )
     if next_state == "needs-requirements-challenge":
-        marker += (
-            f" challenge_round={result['requirements_challenge_round']}"
-            f" scope_changed={str(result['requirements_scope_changed']).lower()}"
-        )
+        marker += f" challenge_round={result['requirements_challenge_round']}"
     marker += " -->"
     lines = [
         marker,
