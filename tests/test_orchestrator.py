@@ -41,6 +41,7 @@ def challenge_result(round_number: int) -> dict:
             }
         ],
         "dispute_responses": [],
+        "agreements": [],
         "evidence": ["Empty input behavior is not defined."],
         "questions": ["Should empty input be rejected or treated as no-op?"],
         "recommended_actions": ["Project Owner should record the chosen behavior."],

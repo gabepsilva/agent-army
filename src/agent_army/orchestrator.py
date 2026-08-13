@@ -33,6 +33,7 @@ from agent_army.publishers import (
     OPTIMIZATION_REVIEW_CHECK_NAME,
     REVIEW_OUTCOME_STATES,
     WORKFLOW_STATES,
+    accumulate_agreements,
     decode_payload,
     render_convergence_escalation,
     render_developer_blocked_result,
@@ -429,6 +430,8 @@ class IssueOrchestrator:
         }
         challenge_work_item["open_disputes"] = open_disputes
         challenge_work_item["prior_findings"] = self._open_challenge_findings(comments)
+        prior_agreements = self._settled_agreements(comments)
+        challenge_work_item["prior_agreements"] = prior_agreements
         try:
             execution = task.agent.executor.execute(
                 AgentExecutionRequest(
@@ -443,7 +446,14 @@ class IssueOrchestrator:
             )
             self._total_cost_usd += execution.cost_usd
             result = execution.output
-            validate_requirements_challenge_result(result, challenge_round, open_disputes)
+            validate_requirements_challenge_result(
+                result, challenge_round, open_disputes, prior_agreements
+            )
+            agreements = accumulate_agreements(
+                prior_agreements,
+                result.get("agreements") or [],
+                result.get("findings") or [],
+            )
             comment = render_requirements_challenge_result(
                 result,
                 source_state=task.source_state,
@@ -451,6 +461,7 @@ class IssueOrchestrator:
                 invocation_id=self._id_factory(),
                 challenge_round=challenge_round,
                 findings=result.get("findings") or [],
+                agreements=agreements,
             )
             self._reviewer_github.create_issue_comment(target, comment)
             self._apply_transition(target, work_item, task, "needs-decision")
@@ -1139,6 +1150,19 @@ class IssueOrchestrator:
             payload = decode_payload(body)
             if payload:
                 return list(payload.get("findings") or [])
+        return []
+
+    def _settled_agreements(
+        self, comments: Iterable[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """What the argument has settled so far."""
+        for comment in reversed(list(comments)):
+            body = str(comment.get("body") or "")
+            if "mode=requirements_challenge" not in body:
+                continue
+            payload = decode_payload(body)
+            if payload:
+                return list(payload.get("agreements") or [])
         return []
 
     def _open_project_owner_disputes(

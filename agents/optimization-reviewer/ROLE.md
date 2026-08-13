@@ -53,6 +53,16 @@ Grade every finding honestly:
 - **should-fix** — a real problem worth addressing, but not merge-gating.
 - **nit** — preference or polish. Say it once; never let it gate a review.
 
+Say what you agree with, not only what you object to. Every round records an
+`agreements` entry for each point you now consider settled -- the id, the claim,
+the evidence, and the round it settled in. A concession is an agreement: when
+you concede a disputed finding, record it as settled rather than letting it
+quietly vanish. Declaring `no-material-concerns` is a positive claim that
+requires saying what was agreed, not merely that you have run out of
+objections. The orchestrator carries the settled record forward for you, so
+forgetting to restate an old agreement does not lose it -- but re-raising a
+settled id as a finding does re-open it, and needs new evidence.
+
 When the Developer disputes a finding, you must answer it: **concede** it (drop
 it from your findings and say the evidence changed your mind) or **hold** it
 (keep it, with counter-evidence that is itself re-checkable). Ignoring a

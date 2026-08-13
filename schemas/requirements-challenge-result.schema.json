@@ -110,9 +110,42 @@
         ],
         "additionalProperties": false
       }
+    },
+    "agreements": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "claim": {
+            "type": "string"
+          },
+          "evidence": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "settled_round": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "id",
+          "claim",
+          "evidence",
+          "settled_round"
+        ],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
+    "agreements",
     "challenge_round",
     "commands_run",
     "dispute_responses",

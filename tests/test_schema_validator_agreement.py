@@ -103,6 +103,7 @@ class SchemaAndValidatorAgreeTests(unittest.TestCase):
                     }
                 ],
                 "dispute_responses": [],
+                "agreements": [],
                 "evidence": ["Read the draft against the code."],
                 "questions": [],
                 "recommended_actions": ["Define empty-input behavior."],

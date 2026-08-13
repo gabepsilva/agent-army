@@ -413,6 +413,7 @@ def validate_requirements_challenge_result(
     result: dict[str, Any],
     expected_round: int,
     open_disputes: list[dict[str, Any]] | None = None,
+    prior_agreements: list[dict[str, Any]] | None = None,
 ) -> None:
     """Validate an issue-level challenge from the shared Reviewer role.
 
@@ -437,6 +438,28 @@ def validate_requirements_challenge_result(
         raise ValueError("concerns-found requires at least one blocking finding.")
     if result["outcome"] == "no-material-concerns" and has_blocking:
         raise ValueError("no-material-concerns cannot leave a blocking finding open.")
+
+    agreements = result.get("agreements") or []
+    for agreement in agreements:
+        _reject_placeholder_text(
+            "agreement claim", agreement["claim"], min_length=_MIN_LIST_ITEM_LENGTH
+        )
+    # A concession is an agreement: record it as one rather than letting the
+    # finding quietly vanish, so what was settled stays visible.
+    settled_ids = {str(agreement["id"]) for agreement in agreements}
+    for response in result.get("dispute_responses") or []:
+        if response["disposition"] == "conceded" and str(response["finding_id"]) not in settled_ids:
+            raise ValueError(
+                f"Conceding {response['finding_id']} must record it in agreements."
+            )
+    # Convergence is a positive claim, not merely the absence of objections.
+    if result["outcome"] == "no-material-concerns" and not (
+        agreements or prior_agreements
+    ):
+        raise ValueError(
+            "Declaring convergence requires saying what was agreed, not just that "
+            "nothing is left to object to."
+        )
 
 
 def render_orchestration_result(
@@ -784,6 +807,41 @@ def validate_signoff_result(result: dict[str, Any]) -> None:
     _validate_findings(result)
 
 
+def accumulate_agreements(
+    prior: list[dict[str, Any]],
+    new: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Grow the settled record across rounds.
+
+    The orchestrator owns this rather than trusting each round to restate the
+    whole history, so nothing is lost by an agent that simply forgets. An id
+    that reappears in findings has been re-opened with fresh evidence and drops
+    back out of the settled set.
+    """
+    reopened = {str(finding["id"]) for finding in findings}
+    merged: dict[str, dict[str, Any]] = {}
+    for agreement in [*prior, *new]:
+        agreement_id = str(agreement["id"])
+        if agreement_id in reopened:
+            continue
+        merged[agreement_id] = agreement
+    return list(merged.values())
+
+
+def _append_agreements(lines: list[str], agreements: list[dict[str, Any]]) -> None:
+    if not agreements:
+        return
+    lines.extend(["", "### Settled", ""])
+    for agreement in sorted(agreements, key=lambda item: item.get("settled_round", 0)):
+        lines.append(
+            f"- **{agreement['id']}** (round {agreement.get('settled_round', '?')}) — "
+            f"{_prose(agreement['claim'])}"
+        )
+        for item in agreement.get("evidence") or []:
+            lines.append(f"  - {_prose(item)}")
+
+
 def render_requirements_challenge_result(
     result: dict[str, Any],
     *,
@@ -792,16 +850,24 @@ def render_requirements_challenge_result(
     invocation_id: str,
     challenge_round: int,
     findings: list[dict[str, Any]] | None = None,
+    agreements: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render one round of the issue-level requirements argument."""
-    validate_requirements_challenge_result(result, challenge_round)
-    outcome = result["outcome"]
     findings = findings if findings is not None else (result.get("findings") or [])
+    agreements = agreements if agreements is not None else (result.get("agreements") or [])
+    # Re-validate against the accumulated record, not just this round's, or a
+    # converging round that restates nothing is wrongly rejected here.
+    validate_requirements_challenge_result(
+        result, challenge_round, prior_agreements=agreements
+    )
+    outcome = result["outcome"]
     blocking = [finding for finding in findings if finding["severity"] == BLOCKING]
     lines = [
         f"<!-- agent-army:result role=optimization-reviewer mode=requirements_challenge "
         f"from={source_state} next={next_state} round={challenge_round} outcome={outcome} -->",
-        encode_payload({"findings": findings, "round": challenge_round}),
+        encode_payload(
+            {"findings": findings, "agreements": agreements, "round": challenge_round}
+        ),
         f"## Agent Army: requirements challenge — round {challenge_round}",
         "",
         f"Outcome: **{outcome}**",
@@ -814,6 +880,15 @@ def render_requirements_challenge_result(
         "",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
     ]
+    if not blocking:
+        lines.extend(
+            [
+                "",
+                "**Converged.** No blocking concern remains on this draft; what was "
+                "agreed is recorded below.",
+            ]
+        )
+    _append_agreements(lines, agreements or [])
     _append_findings(lines, findings)
     _append_dispute_responses(lines, result.get("dispute_responses") or [])
     _append_section(lines, "Challenge evidence", result["evidence"])
