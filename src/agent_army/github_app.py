@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import jwt
@@ -42,6 +43,9 @@ class GitHubAppClient:
 
     def get_issue(self, target: GitHubTarget) -> dict[str, Any]:
         return self._request("GET", self._issue_path(target), self._token())
+
+    def get_repository(self, owner: str, repository: str) -> dict[str, Any]:
+        return self._request("GET", f"/repos/{owner}/{repository}", self._token())
 
     def list_open_issues(self, owner: str, repository: str) -> list[dict[str, Any]]:
         """List open issues for one repository, excluding pull requests."""
@@ -79,6 +83,65 @@ class GitHubAppClient:
 
     def get_pull_request_reviews(self, target: GitHubTarget) -> list[dict[str, Any]]:
         return self._request("GET", f"{self._pull_path(target)}/reviews?per_page=100", self._token())
+
+    def list_open_pull_requests(
+        self, owner: str, repository: str, *, head: str | None = None
+    ) -> list[dict[str, Any]]:
+        query = "state=open&per_page=100"
+        if head:
+            query += f"&head={quote(f'{owner}:{head}', safe=':')}"
+        return self._request(
+            "GET", f"/repos/{owner}/{repository}/pulls?{query}", self._token()
+        )
+
+    def create_pull_request(
+        self,
+        owner: str,
+        repository: str,
+        *,
+        title: str,
+        head: str,
+        base: str,
+        body: str,
+    ) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repository}/pulls",
+            self._token(),
+            {"title": title, "head": head, "base": base, "body": body},
+        )
+
+    def create_check_run(
+        self,
+        owner: str,
+        repository: str,
+        *,
+        name: str,
+        head_sha: str,
+        conclusion: str,
+        summary: str,
+        details_url: str | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {
+            "name": name,
+            "head_sha": head_sha,
+            "status": "completed",
+            "conclusion": conclusion,
+            "output": {"title": name, "summary": summary},
+        }
+        if details_url:
+            body["details_url"] = details_url
+        return self._request(
+            "POST", f"/repos/{owner}/{repository}/check-runs", self._token(), body
+        )
+
+    def get_check_runs(self, owner: str, repository: str, head_sha: str) -> list[dict[str, Any]]:
+        response = self._request(
+            "GET",
+            f"/repos/{owner}/{repository}/commits/{head_sha}/check-runs?per_page=100",
+            self._token(),
+        )
+        return list(response.get("check_runs", []))
 
     def _token(self) -> str:
         if self._installation_token is None:

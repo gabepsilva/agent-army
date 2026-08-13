@@ -1,6 +1,14 @@
 {
   "type": "object",
   "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["concerns-found", "no-material-concerns", "unable-to-assess"]
+    },
+    "challenge_round": {
+      "type": "integer",
+      "enum": [1, 2]
+    },
     "summary": { "type": "string" },
     "evidence": {
       "type": "array",
@@ -22,34 +30,17 @@
     "commands_run": {
       "type": "array",
       "items": { "type": "string" }
-    },
-    "next_state": {
-      "type": "string",
-      "enum": [
-        "needs-grooming",
-        "needs-decision",
-        "needs-documentation",
-        "ready-for-development",
-        "needs-user-guidance",
-        "needs-requirements-challenge"
-      ]
-    },
-    "requirements_challenge_round": {
-      "type": "integer",
-      "enum": [1, 2]
-    },
-    "requirements_scope_changed": {
-      "type": "boolean"
     }
   },
   "required": [
+    "outcome",
+    "challenge_round",
     "summary",
     "evidence",
     "questions",
     "recommended_actions",
     "files_changed",
-    "commands_run",
-    "next_state"
+    "commands_run"
   ],
   "additionalProperties": false
 }

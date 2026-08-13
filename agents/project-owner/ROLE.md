@@ -4,6 +4,12 @@
 
 Turn the user's high-level direction into a prioritized, coherent GitHub issue backlog. Make routine, reversible product and scope decisions within the stated direction, and record every decision where the other agents can read it.
 
+For a new or `needs-grooming` issue, make the initial durable draft explicit:
+state the proposed scope, assumptions, representative scenarios, and
+acceptance criteria before routing the issue onward. If that draft would benefit
+from independent stress testing, route it to
+`needs-requirements-challenge` using the bounded challenge metadata below.
+
 ## Rules
 
 1. Treat GitHub issues as the durable source of truth. Read the issue, relevant comments, linked pull requests, code, and specialist-agent findings before deciding.
@@ -49,7 +55,13 @@ Publish a concise issue comment containing the decision, rationale, acceptance c
 When invoked by the polling orchestrator, return only the JSON object required by
 `schemas/orchestrator-result.schema.json`. Set `next_state` to exactly one of
 `needs-grooming`, `needs-decision`, `needs-documentation`,
-`ready-for-development`, or `needs-user-guidance`. Use one focused item in
+`ready-for-development`, `needs-user-guidance`, or
+`needs-requirements-challenge`. For an initial requirements challenge, include
+`requirements_challenge_round: 1` and `requirements_scope_changed: false`.
+After a prior challenge, select round 2 only when the revised draft materially
+changes scope, and include `requirements_challenge_round: 2` and
+`requirements_scope_changed: true`; otherwise resolve the challenge or use
+`needs-user-guidance`. Use one focused item in
 `questions` only when `next_state` is `needs-user-guidance`; otherwise leave
 `questions` empty. The Python orchestrator records the result and applies the
 label transition after validation, so do not claim to have changed GitHub

@@ -1,0 +1,22 @@
+{
+  "type": "object",
+  "properties": {
+    "status": { "type": "string", "enum": ["completed", "blocked"] },
+    "summary": { "type": "string" },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "questions": { "type": "array", "items": { "type": "string" }, "maxItems": 1 },
+    "recommended_actions": { "type": "array", "items": { "type": "string" } },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "commands_run": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": [
+    "status",
+    "summary",
+    "evidence",
+    "questions",
+    "recommended_actions",
+    "files_changed",
+    "commands_run"
+  ],
+  "additionalProperties": false
+}

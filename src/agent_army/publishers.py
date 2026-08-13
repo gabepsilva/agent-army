@@ -19,6 +19,29 @@ WORKFLOW_STATES = {
     "needs-documentation",
     "ready-for-development",
     "needs-user-guidance",
+    "needs-requirements-challenge",
+    "needs-optimization-review",
+    "ready-for-merge",
+}
+PROJECT_OWNER_STATES = {
+    "needs-grooming",
+    "needs-decision",
+    "needs-documentation",
+    "ready-for-development",
+    "needs-user-guidance",
+    "needs-requirements-challenge",
+}
+REVIEW_OUTCOMES = {"approved", "changes-requested", "unable-to-assess"}
+REVIEW_OUTCOME_STATES = {
+    "approved": "ready-for-merge",
+    "changes-requested": "ready-for-development",
+    "unable-to-assess": "needs-decision",
+}
+OPTIMIZATION_REVIEW_CHECK_NAME = "Agent Army / Optimization Review"
+REQUIREMENTS_CHALLENGE_OUTCOMES = {
+    "concerns-found",
+    "no-material-concerns",
+    "unable-to-assess",
 }
 
 
@@ -54,16 +77,40 @@ def render_documentation_analysis(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def validate_orchestration_result(result: dict[str, Any], role: str) -> None:
+def validate_orchestration_result(
+    result: dict[str, Any], role: str, *, prior_challenge_round: int | None = None
+) -> None:
     """Validate the small result contract used by the polling orchestrator."""
     validate_analysis_result(result)
     next_state = result.get("next_state")
-    if next_state not in WORKFLOW_STATES:
-        raise ValueError("Orchestrator result next_state must be a supported workflow label.")
+    if next_state not in PROJECT_OWNER_STATES:
+        raise ValueError("Orchestrator result next_state must be a Project Owner workflow label.")
     if len(result["questions"]) > 1:
         raise ValueError("An orchestrated agent may ask at most one focused question.")
 
     if role == "project-owner":
+        challenge_round = result.get("requirements_challenge_round")
+        scope_changed = result.get("requirements_scope_changed")
+        if next_state == "needs-requirements-challenge":
+            if not isinstance(challenge_round, int) or challenge_round not in {1, 2}:
+                raise ValueError(
+                    "Requirements challenge routing must specify round 1 or round 2."
+                )
+            if not isinstance(scope_changed, bool):
+                raise ValueError(
+                    "Requirements challenge routing must specify whether scope materially changed."
+                )
+            expected_round = 1 if prior_challenge_round is None else prior_challenge_round + 1
+            if challenge_round != expected_round:
+                raise ValueError("Requirements challenge round is not the next allowed round.")
+            if challenge_round == 1 and scope_changed:
+                raise ValueError("The initial requirements challenge cannot claim a scope revision.")
+            if challenge_round == 2 and not scope_changed:
+                raise ValueError("A follow-up requirements challenge requires a material scope change.")
+        elif challenge_round is not None or scope_changed is not None:
+            raise ValueError(
+                "Requirements challenge metadata is only valid when routing to its workflow state."
+            )
         if next_state == "needs-user-guidance" and len(result["questions"]) != 1:
             raise ValueError(
                 "Project Owner must include exactly one focused question for needs-user-guidance."
@@ -79,6 +126,77 @@ def validate_orchestration_result(result: dict[str, Any], role: str) -> None:
         raise ValueError(f"Unsupported orchestrated role: {role}")
 
 
+def validate_developer_result(result: dict[str, Any]) -> None:
+    """Validate the implementation report returned by Developer."""
+    validate_analysis_result(result)
+    if result.get("status") not in {"completed", "blocked"}:
+        raise ValueError("Developer must return completed or blocked status.")
+    if len(result["questions"]) > 1:
+        raise ValueError("Developer may ask at most one focused question.")
+    if result["status"] == "blocked" and len(result["questions"]) != 1:
+        raise ValueError("A blocked Developer result must include one focused question.")
+    if result["status"] == "completed" and result["questions"]:
+        raise ValueError("A completed Developer result cannot leave an unresolved question.")
+
+
+def render_developer_blocked_result(
+    result: dict[str, Any],
+    *,
+    source_state: str,
+    next_state: str,
+    invocation_id: str,
+) -> str:
+    """Render a Developer clarification as the durable handoff to Project Owner."""
+    validate_developer_result(result)
+    lines = [
+        f"<!-- agent-army:result role=developer invocation={invocation_id} "
+        f"from={source_state} next={next_state} status=blocked -->",
+        "## Agent Army: Developer needs a decision",
+        "",
+        result["summary"].strip(),
+        "",
+        f"Workflow transition: `{source_state}` → `{next_state}`.",
+    ]
+    _append_section(lines, "Evidence", result["evidence"])
+    _append_section(lines, "Focused question", result["questions"])
+    _append_section(lines, "Recommended actions", result["recommended_actions"])
+    lines.extend(
+        [
+            "",
+            "_Developer could not safely continue without a Project Owner decision._",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def validate_optimization_review_result(
+    result: dict[str, Any], expected_commit: str
+) -> None:
+    """Validate an independent review outcome for the exact PR head commit."""
+    validate_analysis_result(result)
+    if result.get("outcome") not in REVIEW_OUTCOMES:
+        raise ValueError("Optimization Reviewer must return a supported outcome.")
+    if result.get("reviewed_commit") != expected_commit:
+        raise ValueError("Optimization Reviewer result does not match the current PR commit.")
+    if result["files_changed"]:
+        raise ValueError("Optimization Reviewer must not change files.")
+
+
+def validate_requirements_challenge_result(
+    result: dict[str, Any], expected_round: int
+) -> None:
+    """Validate an issue-level challenge from the shared Reviewer role."""
+    validate_analysis_result(result)
+    if result.get("outcome") not in REQUIREMENTS_CHALLENGE_OUTCOMES:
+        raise ValueError("Requirements challenge must return a supported outcome.")
+    if result.get("challenge_round") != expected_round:
+        raise ValueError("Requirements challenge result does not match the current round.")
+    if result["files_changed"]:
+        raise ValueError("Requirements Reviewer must not change files.")
+    if len(result["questions"]) > 1:
+        raise ValueError("Requirements Reviewer may ask at most one focused question.")
+
+
 def render_orchestration_result(
     result: dict[str, Any],
     *,
@@ -86,13 +204,25 @@ def render_orchestration_result(
     source_state: str,
     next_state: str,
     invocation_id: str,
+    prior_challenge_round: int | None = None,
 ) -> str:
     """Render a validated agent result with durable orchestration metadata."""
-    validate_orchestration_result(result, role)
+    validate_orchestration_result(
+        result, role, prior_challenge_round=prior_challenge_round
+    )
     heading = "Project Owner" if role == "project-owner" else "Doku"
-    lines = [
+    marker = (
         f"<!-- agent-army:result role={role} invocation={invocation_id} "
-        f"from={source_state} next={next_state} -->",
+        f"from={source_state} next={next_state}"
+    )
+    if next_state == "needs-requirements-challenge":
+        marker += (
+            f" challenge_round={result['requirements_challenge_round']}"
+            f" scope_changed={str(result['requirements_scope_changed']).lower()}"
+        )
+    marker += " -->"
+    lines = [
+        marker,
         f"## Agent Army: {heading} completed",
         "",
         "### Decision" if role == "project-owner" else "### Summary",
@@ -110,6 +240,110 @@ def render_orchestration_result(
         [
             "",
             "_This validated result is the durable record used by the Agent Army polling workflow._",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def render_developer_result(
+    result: dict[str, Any],
+    *,
+    source_state: str,
+    next_state: str,
+    invocation_id: str,
+    pull_request_number: int,
+    pull_request_url: str,
+    branch: str,
+    head_sha: str,
+) -> str:
+    """Render Developer's validated implementation and PR handoff."""
+    validate_developer_result(result)
+    lines = [
+        f"<!-- agent-army:result role=developer invocation={invocation_id} "
+        f"from={source_state} next={next_state} pr={pull_request_number} "
+        f"branch={branch} head={head_sha} -->",
+        "## Agent Army: Developer completed",
+        "",
+        result["summary"].strip(),
+        "",
+        f"Pull request: [{pull_request_url}]({pull_request_url})",
+        f"Branch: `{branch}`",
+        f"Workflow transition: `{source_state}` → `{next_state}`.",
+    ]
+    _append_section(lines, "Evidence", result["evidence"])
+    _append_section(lines, "Focused question", result["questions"])
+    _append_section(lines, "Recommended actions", result["recommended_actions"])
+    if result["files_changed"]:
+        _append_section(lines, "Files changed", result["files_changed"])
+    lines.extend(["", "_Developer work was prepared in an isolated workspace._"])
+    return "\n".join(lines)
+
+
+def render_optimization_review_result(
+    result: dict[str, Any],
+    *,
+    source_state: str,
+    next_state: str,
+    invocation_id: str,
+    pull_request_number: int,
+    pull_request_url: str,
+    branch: str,
+    head_sha: str,
+) -> str:
+    """Render the review outcome and exact commit under review."""
+    validate_optimization_review_result(result, head_sha)
+    outcome = result["outcome"]
+    lines = [
+        f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
+        f"from={source_state} next={next_state} outcome={outcome} "
+        f"pr={pull_request_number} branch={branch} head={head_sha} -->",
+        "## Agent Army: Optimization Reviewer completed",
+        "",
+        f"Outcome: **{outcome}**",
+        "",
+        result["summary"].strip(),
+        "",
+        f"Pull request: [{pull_request_url}]({pull_request_url})",
+        f"Commit reviewed: `{head_sha}`",
+        f"Workflow transition: `{source_state}` → `{next_state}`.",
+    ]
+    _append_section(lines, "Evidence", result["evidence"])
+    _append_section(lines, "Questions", result["questions"])
+    _append_section(lines, "Recommended actions", result["recommended_actions"])
+    lines.extend(["", "_This review did not modify the pull request._"])
+    return "\n".join(lines)
+
+
+def render_requirements_challenge_result(
+    result: dict[str, Any],
+    *,
+    source_state: str,
+    next_state: str,
+    invocation_id: str,
+    challenge_round: int,
+) -> str:
+    """Render one bounded issue-level requirements challenge."""
+    validate_requirements_challenge_result(result, challenge_round)
+    outcome = result["outcome"]
+    lines = [
+        f"<!-- agent-army:result role=optimization-reviewer mode=requirements_challenge "
+        f"from={source_state} next={next_state} round={challenge_round} outcome={outcome} -->",
+        "## Agent Army: requirements challenge completed",
+        "",
+        f"Outcome: **{outcome}**",
+        "",
+        result["summary"].strip(),
+        "",
+        f"Challenge round: `{challenge_round}`",
+        f"Workflow transition: `{source_state}` → `{next_state}`.",
+    ]
+    _append_section(lines, "Challenge evidence", result["evidence"])
+    _append_section(lines, "Focused question", result["questions"])
+    _append_section(lines, "Recommended actions", result["recommended_actions"])
+    lines.extend(
+        [
+            "",
+            "_Project Owner must resolve this challenge before selecting the next workflow state._",
         ]
     )
     return "\n".join(lines)

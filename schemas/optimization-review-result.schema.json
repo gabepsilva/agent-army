@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": {
+      "type": "string",
+      "enum": ["approved", "changes-requested", "unable-to-assess"]
+    },
+    "reviewed_commit": { "type": "string", "minLength": 7 },
+    "summary": { "type": "string" },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "questions": { "type": "array", "items": { "type": "string" }, "maxItems": 1 },
+    "recommended_actions": { "type": "array", "items": { "type": "string" } },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "commands_run": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": [
+    "outcome",
+    "reviewed_commit",
+    "summary",
+    "evidence",
+    "questions",
+    "recommended_actions",
+    "files_changed",
+    "commands_run"
+  ],
+  "additionalProperties": false
+}
