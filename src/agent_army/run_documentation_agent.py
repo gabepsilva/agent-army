@@ -8,7 +8,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_army.codex_executor import CodexCliExecutor, CodexExecutionRequest
+from agent_army.codex_executor import (
+    CodexCliExecutor,
+    CodexExecutionRequest,
+    role_reference_paths,
+)
 from agent_army.config import load_github_app_config
 from agent_army.credentials import SessionCredentialBroker
 from agent_army.documentation_context import add_documentation_signals
@@ -34,6 +38,7 @@ def run(issue_url: str, agent_directory: Path, workspace: Path, schema_path: Pat
                 workspace=workspace,
                 work_item=add_documentation_signals(work_item),
                 output_schema_path=schema_path,
+                reference_paths=role_reference_paths(role_path),
             )
         )
         comment = render_documentation_analysis(analysis)

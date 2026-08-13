@@ -7,7 +7,7 @@ import json
 import sys
 from pathlib import Path
 
-from agent_army.codex_executor import CodexCliExecutor, CodexExecutionRequest
+from agent_army.codex_executor import CodexCliExecutor, CodexExecutionRequest, role_reference_paths
 
 
 def main() -> None:
@@ -31,6 +31,7 @@ def main() -> None:
                 workspace=args.workspace,
                 work_item=work_item,
                 output_schema_path=args.output_schema,
+                reference_paths=role_reference_paths(args.role),
             )
         )
     except (OSError, RuntimeError, ValueError, json.JSONDecodeError) as error:

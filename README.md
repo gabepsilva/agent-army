@@ -46,8 +46,10 @@ uv run execute-agent \
 
 The executor runs `codex exec` with a workspace-write sandbox. It does not pass
 GitHub App credentials or GitHub tokens into Codex; GitHub operations remain in
-the Python orchestrator. Codex's live operational progress is shown on stderr;
-the final JSON result is captured and printed on stdout.
+the Python orchestrator. Codex subprocess progress is captured quietly; only
+the final JSON result is used by the workflow. If the role directory contains
+the supported Domain Modeling reference, its selected skill text is embedded
+in the prompt explicitly; unrelated reference files are not included.
 
 ## Publish a Doku issue analysis
 
@@ -78,6 +80,22 @@ uv run run-documentation-agent \
 It reads the issue, runs Doku through Codex CLI in the supplied workspace, and
 posts one issue comment using Doku's GitHub App. It does not write the analysis
 JSON to disk or create a pull request.
+
+## Run the issue-driven orchestrator
+
+The polling service processes one state-changing issue task at a time:
+
+```bash
+uv run run-orchestrator \
+  --repository OWNER/REPOSITORY \
+  --workspace /path/to/target-repository
+```
+
+Use `--once` for one polling pass. The supported labels, ownership model,
+unlabeled intake path, `orchestration-paused` guard, user-guidance pause,
+transitions, one-result-comment behavior, and retry behavior are documented in
+[ORCHESTRATOR.md](ORCHESTRATOR.md). A human can add `orchestration-paused` to
+make the orchestrator ignore an issue completely until that label is removed.
 
 ## Session credentials
 

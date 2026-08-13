@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "properties": {
+    "summary": { "type": "string" },
+    "evidence": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "questions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "maxItems": 1
+    },
+    "recommended_actions": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "files_changed": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "commands_run": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "next_state": {
+      "type": "string",
+      "enum": [
+        "needs-grooming",
+        "needs-decision",
+        "needs-documentation",
+        "ready-for-development",
+        "needs-user-guidance"
+      ]
+    }
+  },
+  "required": [
+    "summary",
+    "evidence",
+    "questions",
+    "recommended_actions",
+    "files_changed",
+    "commands_run",
+    "next_state"
+  ],
+  "additionalProperties": false
+}

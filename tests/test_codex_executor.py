@@ -14,6 +14,7 @@ class CodexCliExecutorTests(unittest.TestCase):
         def runner(command, **kwargs):
             captured["command"] = command
             captured["prompt"] = kwargs["input"]
+            captured["stderr"] = kwargs["stderr"]
             return subprocess.CompletedProcess(command, 0, stdout='{"summary":"ok"}', stderr=None)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -23,11 +24,20 @@ class CodexCliExecutorTests(unittest.TestCase):
             schema = workspace / "schema.json"
             role.write_text("# Test role", encoding="utf-8")
             schema.write_text("{}", encoding="utf-8")
+            reference = workspace / "domain-modeling.md"
+            reference.write_text("# Domain Modeling reference", encoding="utf-8")
+            unrelated = workspace / "unrelated.md"
+            unrelated.write_text("# Unrelated reference", encoding="utf-8")
             result = CodexCliExecutor(runner).execute(
-                CodexExecutionRequest(role, workspace, {"issue": "data"}, schema)
+                CodexExecutionRequest(
+                    role, workspace, {"issue": "data"}, schema, (reference,)
+                )
             )
 
         self.assertEqual(result, {"summary": "ok"})
         self.assertIn("workspace-write", captured["command"])
+        self.assertEqual(captured["stderr"], subprocess.PIPE)
         self.assertNotIn("CODEX_API_KEY", captured["prompt"])
         self.assertIn("untrusted data", captured["prompt"])
+        self.assertIn("# Domain Modeling reference", captured["prompt"])
+        self.assertNotIn("# Unrelated reference", captured["prompt"])

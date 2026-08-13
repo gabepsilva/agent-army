@@ -43,6 +43,15 @@ class GitHubAppClient:
     def get_issue(self, target: GitHubTarget) -> dict[str, Any]:
         return self._request("GET", self._issue_path(target), self._token())
 
+    def list_open_issues(self, owner: str, repository: str) -> list[dict[str, Any]]:
+        """List open issues for one repository, excluding pull requests."""
+        issues = self._request(
+            "GET",
+            f"/repos/{owner}/{repository}/issues?state=open&per_page=100",
+            self._token(),
+        )
+        return [issue for issue in issues if "pull_request" not in issue]
+
     def get_issue_comments(self, target: GitHubTarget) -> list[dict[str, Any]]:
         return self._request("GET", f"{self._issue_path(target)}/comments?per_page=100", self._token())
 
@@ -52,6 +61,14 @@ class GitHubAppClient:
             raise ValueError("Issue comments can only be posted to issue targets.")
         return self._request(
             "POST", f"{self._issue_path(target)}/comments", self._token(), {"body": body}
+        )
+
+    def update_issue_labels(self, target: GitHubTarget, labels: list[str]) -> dict[str, Any]:
+        """Replace an issue's labels without exposing credentials to an agent."""
+        if target.kind != "issue":
+            raise ValueError("Workflow labels can only be changed on issue targets.")
+        return self._request(
+            "PATCH", self._issue_path(target), self._token(), {"labels": labels}
         )
 
     def get_pull_request(self, target: GitHubTarget) -> dict[str, Any]:

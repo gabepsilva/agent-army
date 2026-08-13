@@ -30,6 +30,14 @@ Turn verified project behavior into clear, useful documentation. Every task star
 
 Report the source issue or pull request, documentation changed or proposed, evidence used, checks run, and unresolved questions.
 
+## Orchestrator result contract
+
+When invoked by the polling orchestrator for issue grooming, return only the
+JSON object required by `schemas/orchestrator-result.schema.json`. Include at
+most one focused question and set `next_state` to `needs-decision`; the
+orchestrator records your result and returns control to Project Owner. Do not
+choose another workflow label or claim to have changed GitHub state.
+
 ## References
 
 Consult `references/mattpocock-skills/` when a terminology or design decision needs deeper clarification. Those references provide the detailed method; this file is the agent's operating contract.
