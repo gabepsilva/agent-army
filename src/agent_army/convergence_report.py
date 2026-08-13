@@ -119,6 +119,12 @@ def analyze_issue(
                 continue
             if attributes.get("kind") != "result":
                 continue
+            if not attributes.get("pr", "").isdigit():
+                # An issue-level requirements challenge shares the reviewer
+                # role and the result marker kind, but is not a PR review
+                # round -- it carries no pr attribute. Counting it inflates
+                # the round total and skews the convergence picture.
+                continue
             rounds += 1
             outcome = attributes.get("outcome") or outcome
             for finding in payload.get("findings") or []:

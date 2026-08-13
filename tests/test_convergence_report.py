@@ -96,6 +96,23 @@ class ArgumentMeasurementTests(unittest.TestCase):
         self.assertEqual(report.flags, ())
 
 
+    def test_a_requirements_challenge_is_not_counted_as_a_review_round(self) -> None:
+        # The issue-level challenge shares the reviewer role and the result
+        # marker kind but carries no pr attribute; counting it inflated the
+        # round total on real data.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=1 outcome=concerns-found -->"
+            },
+            developer_comment(head="sha1"),
+            review_comment(round_number=1, head="sha1", outcome="approved", findings=[]),
+        ]
+
+        self.assertEqual(analyze_issue(7, comments).rounds, 1)
+
+
 class SmellTests(unittest.TestCase):
     """The flags do not judge argument quality -- they surface the shapes
     that are worth a human actually reading."""
