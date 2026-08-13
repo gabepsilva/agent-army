@@ -40,6 +40,7 @@ def run(
     developer_output_schema_path: Path,
     reviewer_output_schema_path: Path,
     requirements_challenge_output_schema_path: Path,
+    design_signoff_output_schema_path: Path,
     poll_interval: float = 60.0,
     once: bool = False,
     runtime_config: RuntimeConfig | None = None,
@@ -72,6 +73,7 @@ def run(
             developer_output_schema_path=developer_output_schema_path,
             reviewer_output_schema_path=reviewer_output_schema_path,
             requirements_challenge_output_schema_path=requirements_challenge_output_schema_path,
+            design_signoff_output_schema_path=design_signoff_output_schema_path,
             executors={
                 role: build_executor(
                     load_agent_runtime_config(directory / "agent-config.yaml", base_runtime)
@@ -145,6 +147,12 @@ def main() -> None:
         help="JSON Schema for the Optimization Reviewer's issue-level challenge result.",
     )
     parser.add_argument(
+        "--design-signoff-output-schema",
+        type=Path,
+        default=Path("schemas/design-signoff-result.schema.json"),
+        help="JSON Schema for the Optimization Reviewer's Final Design sign-off verdict.",
+    )
+    parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
@@ -175,6 +183,7 @@ def main() -> None:
             developer_output_schema_path=args.developer_output_schema,
             reviewer_output_schema_path=args.reviewer_output_schema,
             requirements_challenge_output_schema_path=args.requirements_challenge_output_schema,
+            design_signoff_output_schema_path=args.design_signoff_output_schema,
             poll_interval=args.poll_interval,
             once=args.once,
             runtime_config=load_runtime_config(args.config).with_backend(args.backend),

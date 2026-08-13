@@ -42,6 +42,9 @@ def bounded_text(value: str | None, limit: int = MAX_TEXT_LENGTH) -> str:
 
 def compact_comment(comment: dict[str, Any]) -> dict[str, Any]:
     return {
+        # The id is what lets the orchestrator stamp or revise a specific
+        # comment later; it is an identifier, not content.
+        "id": comment.get("id"),
         "author": comment.get("user", {}).get("login"),
         "created_at": comment.get("created_at"),
         "body": bounded_text(comment.get("body")),

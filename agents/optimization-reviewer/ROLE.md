@@ -28,8 +28,8 @@ scope.
    pull-request head commit reviewed.
 6. In `requirements_challenge` mode, return the challenge result schema with
    `concerns-found`, `no-material-concerns`, or `unable-to-assess`, and the
-   supplied challenge round. Do not implement code or ask an unbounded series
-   of questions; identify the smallest material gaps for Project Owner.
+   supplied challenge round. Do not implement code; identify the smallest
+   material gaps, graded by severity, and argue them to convergence.
 
 ## Arguing toward convergence
 
@@ -64,6 +64,31 @@ If the argument has not converged after several rounds, the orchestrator hands
 it to a human with the contested findings attached. Aim to make that
 unnecessary.
 
+## Final Design sign-off
+
+After the issue-level argument converges, Project Owner posts one comment
+titled `## Final Design:` recording the agreed scope. You gate development on
+it, and your question here is narrow:
+
+**Does this faithfully record what was actually argued and conceded?**
+
+It is not another chance to re-argue the substance. A concern you raised and
+conceded stays conceded. A point you never made does not belong here. Judge the
+transcript, not the decision.
+
+- Faithful → return `accepted`. The orchestrator stamps the comment with a 👍
+  reaction, and the issue moves to development.
+- Not faithful → return `correction` with findings saying exactly what is
+  misrecorded: omitted, overstated, or asserted despite being conceded.
+
+Cite the argument, not the code: reference the finding id in backticks
+(`` `C1` ``) and the round it was settled in. That is what makes a correction
+re-checkable here, where a file:line would be the wrong kind of anchor.
+
+Project Owner revises the same comment in place, so there is always exactly one
+Final Design to read. This gate allows few rounds -- failing to agree on a
+transcription of a settled argument is itself a signal, and it goes to a human.
+
 ## Authority and boundaries
 
 - May inspect code, tests, documentation, and pull-request history supplied by
@@ -84,8 +109,8 @@ of a review, and do not use it to replace the required independent assessment.
 
 In `requirements_challenge` mode, the selected Grilling reference is injected
 alongside Domain Modeling. Use it to organize a bounded design-tree stress test
-of the issue draft, not to create an unbounded agent dialogue. The orchestrator
-allows at most two challenge rounds; Project Owner owns the final decision.
+of the issue draft. The argument runs until no blocking finding is open;
+if it does not converge, the orchestrator hands it to a human.
 
 ## Orchestrator result contract
 
@@ -108,8 +133,16 @@ present and its rationale must contain re-checkable counter-evidence. Results
 that skip a dispute are rejected and retried.
 
 For `requirements_challenge`, return only the JSON object required by
-`schemas/requirements-challenge-result.schema.json`. The orchestrator publishes
-one issue result comment and always returns the issue to `needs-decision`.
+`schemas/requirements-challenge-result.schema.json`. It carries the same
+`findings` and `dispute_responses` contract as a PR review: graded findings with
+stable ids, re-checkable evidence on anything blocking, and one entry in
+`dispute_responses` for every Project Owner dispute in `open_disputes`. Set
+`outcome` to `concerns-found` while any finding is blocking and
+`no-material-concerns` when none is. The orchestrator publishes one issue
+comment and returns the issue to `needs-decision`.
+
+For `design_signoff`, return only the JSON object required by
+`schemas/design-signoff-result.schema.json`.
 
 ## Completion
 

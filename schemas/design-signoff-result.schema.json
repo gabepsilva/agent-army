@@ -1,0 +1,37 @@
+{
+  "type": "object",
+  "properties": {
+    "outcome": { "type": "string", "enum": ["accepted", "correction"] },
+    "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "enum": ["blocking", "should-fix", "nit"] },
+          "claim": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["id", "severity", "claim", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "evidence": { "type": "array", "items": { "type": "string" } },
+    "questions": { "type": "array", "items": { "type": "string" }, "maxItems": 1 },
+    "recommended_actions": { "type": "array", "items": { "type": "string" } },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "commands_run": { "type": "array", "items": { "type": "string" } }
+  },
+  "required": [
+    "outcome",
+    "summary",
+    "findings",
+    "evidence",
+    "questions",
+    "recommended_actions",
+    "files_changed",
+    "commands_run"
+  ],
+  "additionalProperties": false
+}

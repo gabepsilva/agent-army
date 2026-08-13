@@ -17,7 +17,7 @@ from agent_army.agent_executor import (
     CodexCliExecutor,
     role_reference_paths,
 )
-from agent_army.github_app import GitHubAppClient, GitHubTarget
+from agent_army.github_app import DESIGN_SIGNOFF_REACTION, GitHubAppClient, GitHubTarget
 from agent_army.git_worktrees import (
     IsolatedGitWorktree,
     branch_name,
@@ -27,7 +27,9 @@ from agent_army.git_worktrees import (
 )
 from agent_army.publishers import (
     BLOCKING,
+    FINAL_DESIGN_HEADING,
     MAX_CONVERGENCE_ROUNDS,
+    MAX_SIGNOFF_ROUNDS,
     OPTIMIZATION_REVIEW_CHECK_NAME,
     REVIEW_OUTCOME_STATES,
     WORKFLOW_STATES,
@@ -37,12 +39,15 @@ from agent_army.publishers import (
     render_developer_result,
     render_optimization_review_marker_comment,
     render_optimization_review_result,
+    render_final_design,
     render_orchestration_result,
     render_requirements_challenge_result,
+    render_signoff_correction,
     validate_developer_result,
     validate_optimization_review_result,
     validate_orchestration_result,
     validate_requirements_challenge_result,
+    validate_signoff_result,
 )
 from agent_army.work_items import WorkItemReader
 
@@ -113,6 +118,7 @@ class IssueOrchestrator:
         developer_output_schema_path: Path | None = None,
         reviewer_output_schema_path: Path | None = None,
         requirements_challenge_output_schema_path: Path | None = None,
+        design_signoff_output_schema_path: Path | None = None,
         executor: AgentExecutor | None = None,
         executors: Mapping[str, AgentExecutor] | None = None,
         work_item_reader: WorkItemReader | None = None,
@@ -173,6 +179,7 @@ class IssueOrchestrator:
         self._reviewer_github = reviewer_github
         self._review_reader = WorkItemReader(reviewer_github) if reviewer_github else None
         self._requirements_challenge_schema_path = requirements_challenge_output_schema_path
+        self._signoff_schema_path = design_signoff_output_schema_path
 
     @property
     def total_cost_usd(self) -> float:
@@ -255,6 +262,10 @@ class IssueOrchestrator:
                 # A second challenge may only be recovered, never started again.
                 return None
             return challenge_task
+        if current_state == "needs-design-signoff" and OPTIMIZATION_REVIEWER in self._agents:
+            return _Task(
+                self._agents[OPTIMIZATION_REVIEWER], current_state, "design_signoff"
+            )
         if current_state == "ready-for-development" and DEVELOPER in self._agents:
             return _Task(self._agents[DEVELOPER], current_state)
         if current_state == "needs-optimization-review" and OPTIMIZATION_REVIEWER in self._agents:
@@ -269,6 +280,8 @@ class IssueOrchestrator:
         if task.agent.name == OPTIMIZATION_REVIEWER:
             if task.invocation_mode == "requirements_challenge":
                 return self._run_requirements_challenge_task(target, work_item, task)
+            if task.invocation_mode == "design_signoff":
+                return self._run_design_signoff_task(target, work_item, task)
             return self._run_reviewer_task(target, work_item, task)
         return self._run_issue_task(target, work_item, task)
 
@@ -325,6 +338,27 @@ class IssueOrchestrator:
                 else None,
             )
             task.agent.github.create_issue_comment(target, comment)
+            if next_state == "needs-design-signoff":
+                # The canonical converged spec, posted as its own artifact so
+                # the Reviewer has one unambiguous thing to stamp. A later
+                # correction revises this comment in place rather than adding
+                # a competing version.
+                existing = self._find_final_design_comment(
+                    work_item["issue"].get("comments", [])
+                )
+                design_body = render_final_design(
+                    str(result.get("final_design") or result["summary"]),
+                    source_state=task.source_state,
+                    next_state=next_state,
+                    invocation_id=invocation_id,
+                    revision=self._signoff_revision(work_item["issue"].get("comments", [])) + 1,
+                )
+                if existing is not None and existing.get("id") is not None:
+                    task.agent.github.update_issue_comment(
+                        self.owner, self.repository, int(existing["id"]), design_body
+                    )
+                else:
+                    task.agent.github.create_issue_comment(target, design_body)
         except Exception as error:
             return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
         try:
@@ -412,6 +446,119 @@ class IssueOrchestrator:
                 findings=result.get("findings") or [],
             )
             self._reviewer_github.create_issue_comment(target, comment)
+            self._apply_transition(target, work_item, task, "needs-decision")
+        except Exception as error:
+            return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
+        return OrchestrationOutcome("processed", target.number, task.agent.name)
+
+    def _find_final_design_comment(
+        self, comments: Iterable[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """The canonical Final Design comment, if one has been posted."""
+        for comment in reversed(list(comments)):
+            if "<!-- agent-army:final_design " in str(comment.get("body") or ""):
+                return comment
+        return None
+
+    @staticmethod
+    def _signoff_revision(comments: Iterable[dict[str, Any]]) -> int:
+        """How many correction rounds the sign-off gate has already spent."""
+        return sum(
+            1
+            for attributes in _iter_markers(comments)
+            if attributes.get("kind") == "signoff"
+            and attributes.get("outcome") == "correction"
+        )
+
+    def _is_stamped(self, comment: dict[str, Any]) -> bool:
+        """Has the Reviewer stamped this comment as a faithful record?"""
+        if self._reviewer_github is None:
+            return False
+        comment_id = comment.get("id")
+        if comment_id is None:
+            return False
+        try:
+            reactions = self._reviewer_github.list_reactions(
+                self.owner, self.repository, int(comment_id)
+            )
+        except Exception:
+            return False
+        return any(
+            reaction.get("content") == DESIGN_SIGNOFF_REACTION for reaction in reactions
+        )
+
+    def _run_design_signoff_task(
+        self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
+    ) -> OrchestrationOutcome:
+        """Gate development on the Reviewer agreeing the write-up is faithful.
+
+        This checks fidelity, not substance: the argument is already settled by
+        the time a Final Design exists. The Reviewer either stamps the comment
+        or says what it misrecords, and Project Owner revises it in place.
+        """
+        if self._reviewer_github is None or self._signoff_schema_path is None:
+            return OrchestrationOutcome(
+                "failed", target.number, task.agent.name, "Design sign-off is not configured."
+            )
+        comments = work_item["issue"].get("comments", [])
+        design = self._find_final_design_comment(comments)
+        if design is None:
+            return OrchestrationOutcome(
+                "failed", target.number, task.agent.name, "No Final Design comment to sign off."
+            )
+        if self._is_stamped(design):
+            # Already agreed in a prior pass; only the label lagged behind.
+            try:
+                self._apply_transition(target, work_item, task, "ready-for-development")
+            except Exception as error:
+                return OrchestrationOutcome(
+                    "retrying-label-update", target.number, task.agent.name, str(error)
+                )
+            return OrchestrationOutcome("recovered", target.number, task.agent.name)
+
+        revision = self._signoff_revision(comments)
+        if revision >= MAX_SIGNOFF_ROUNDS:
+            try:
+                self._reviewer_github.create_issue_comment(
+                    target,
+                    "## Agent Army: Final Design sign-off did not converge\n\n"
+                    f"The Reviewer has posted {revision} corrections without accepting the "
+                    "Final Design write-up. Failing to agree on a transcription of an "
+                    "already-settled argument needs a human.\n\n"
+                    f"Workflow transition: `{task.source_state}` → `needs-user-guidance`.",
+                )
+                self._apply_transition(target, work_item, task, "needs-user-guidance")
+            except Exception as error:
+                return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
+            return OrchestrationOutcome("escalated", target.number, task.agent.name)
+
+        signoff_work_item = dict(work_item)
+        signoff_work_item["final_design"] = str(design.get("body") or "")
+        signoff_work_item["signoff_revision"] = revision + 1
+        try:
+            execution = task.agent.executor.execute(
+                AgentExecutionRequest(
+                    role_path=task.agent.role_path,
+                    workspace=self._workspace,
+                    work_item=signoff_work_item,
+                    output_schema_path=self._signoff_schema_path,
+                    reference_paths=role_reference_paths(task.agent.role_path),
+                )
+            )
+            self._total_cost_usd += execution.cost_usd
+            result = execution.output
+            validate_signoff_result(result)
+            if result["outcome"] == "accepted":
+                self._reviewer_github.create_reaction(
+                    self.owner, self.repository, int(design["id"]), DESIGN_SIGNOFF_REACTION
+                )
+                self._apply_transition(target, work_item, task, "ready-for-development")
+                return OrchestrationOutcome("processed", target.number, task.agent.name)
+            correction = render_signoff_correction(
+                result, invocation_id=self._id_factory(), revision=revision + 1
+            )
+            self._reviewer_github.create_issue_comment(target, correction)
+            # Stay in this state: Project Owner revises the design in place.
             self._apply_transition(target, work_item, task, "needs-decision")
         except Exception as error:
             return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))

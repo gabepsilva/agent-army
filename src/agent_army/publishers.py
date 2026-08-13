@@ -74,6 +74,7 @@ MAX_CONVERGENCE_ROUNDS = 7
 # Failing to agree on a transcription in three passes is itself the signal.
 MAX_SIGNOFF_ROUNDS = 3
 FINAL_DESIGN_HEADING = "## Final Design:"
+SIGNOFF_OUTCOMES = {"accepted", "correction"}
 
 # A claim that cannot be re-checked is an opinion. Blocking findings and
 # disputes -- the two moves that cost the other side real work -- must point at
@@ -691,6 +692,77 @@ def render_optimization_review_marker_comment(
         ]
     )
     return "\n".join(lines)
+
+
+def render_final_design(
+    design: str,
+    *,
+    source_state: str,
+    next_state: str,
+    invocation_id: str,
+    revision: int,
+) -> str:
+    """Render the canonical converged design for Reviewer sign-off.
+
+    One artifact, revised in place. A correction edits this comment rather
+    than appending a competing version, so there is never ambiguity about
+    which text the stamp applies to.
+    """
+    return "\n".join(
+        [
+            f"<!-- agent-army:final_design role=project-owner invocation={invocation_id} "
+            f"from={source_state} next={next_state} revision={revision} -->",
+            FINAL_DESIGN_HEADING,
+            "",
+            _prose(design),
+            "",
+            "---",
+            "_Converged design awaiting Optimization Reviewer sign-off. The Reviewer "
+            "checks that this faithfully records what was argued and conceded; it "
+            "stamps this comment when it does, or posts a correction when it does not._",
+        ]
+    )
+
+
+def render_signoff_correction(
+    result: dict[str, Any],
+    *,
+    invocation_id: str,
+    revision: int,
+) -> str:
+    """Render a Reviewer's objection that the write-up misrecords the argument."""
+    lines = [
+        f"<!-- agent-army:signoff role=optimization-reviewer invocation={invocation_id} "
+        f"revision={revision} outcome=correction -->",
+        f"## Agent Army: Final Design correction — revision {revision}",
+        "",
+        _prose(result["summary"]),
+    ]
+    _append_findings(lines, result.get("findings") or [])
+    _append_section(lines, "Recommended actions", result["recommended_actions"])
+    lines.extend(
+        [
+            "",
+            "_Project Owner must revise the Final Design comment in place; this gate "
+            "checks fidelity to the argument, not the substance of it._",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def validate_signoff_result(result: dict[str, Any]) -> None:
+    """Validate a sign-off verdict on the Final Design write-up."""
+    validate_analysis_result(result)
+    if result.get("outcome") not in SIGNOFF_OUTCOMES:
+        raise ValueError("Sign-off must return accepted or correction.")
+    if result["files_changed"]:
+        raise ValueError("Sign-off must not change files.")
+    findings = result.get("findings") or []
+    if result["outcome"] == "correction" and not findings:
+        raise ValueError("A sign-off correction must say what the write-up misrecords.")
+    if result["outcome"] == "accepted" and findings:
+        raise ValueError("An accepted sign-off cannot leave corrections outstanding.")
+    _validate_findings(result)
 
 
 def render_requirements_challenge_result(
