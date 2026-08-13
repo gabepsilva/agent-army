@@ -32,6 +32,18 @@ def blocked_developer_result() -> dict:
     }
 
 
+def project_owner_decision_result() -> dict:
+    return {
+        "summary": "Resolved the review's concerns with a small, reversible scope clarification.",
+        "evidence": ["The Optimization Reviewer flagged an ambiguous edge case."],
+        "questions": [],
+        "recommended_actions": ["Developer should implement the clarified scope."],
+        "files_changed": [],
+        "commands_run": [],
+        "next_state": "ready-for-development",
+    }
+
+
 def review_result() -> dict:
     return {
         "outcome": "approved",
@@ -91,7 +103,14 @@ class FakeWorkflowGitHub:
         return self.pr_comments if target.kind == "pull_request" else self.comments
 
     def create_issue_comment(self, target, body: str) -> dict:
-        self.comments.append({"body": body, "user": {"login": "agent-army"}})
+        entry = {"body": body, "user": {"login": "agent-army"}}
+        if target.number == self.pull_request["number"]:
+            # A PR-conversation comment (posted via an "issue"-kind target
+            # whose number is the PR's) lands in the PR's own thread, not
+            # the originating issue's.
+            self.pr_comments.append(entry)
+        else:
+            self.comments.append(entry)
         return {"html_url": "https://github.com/acme/widgets/issues/7#comment"}
 
     def update_issue_labels(self, target, labels: list[str]) -> dict:
@@ -232,7 +251,14 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(github.labels, ["ready-for-merge"])
         self.assertEqual(len(github.checks), 1)
         self.assertIn("Outcome: **approved**", github.checks[0]["output"]["summary"])
+        # The full review (evidence, questions, recommended actions) is
+        # posted on the pull request, not duplicated onto the issue.
+        self.assertEqual(len(github.pr_comments), 1)
+        self.assertIn("Evidence", github.pr_comments[0]["body"])
+        # The issue only gets the durable marker: outcome, link, transition.
         self.assertEqual(len(github.comments), 2)
+        self.assertNotIn("Evidence", github.comments[1]["body"])
+        self.assertIn("Full review: [pull request #9]", github.comments[1]["body"])
         self.assertEqual(
             executor.requests[0].reference_paths,
             (
@@ -242,6 +268,25 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_project_owner_sees_the_linked_pull_request_directly(self) -> None:
+        # Project Owner picking up needs-decision used to only ever see
+        # whatever got manually duplicated into an issue comment. It should
+        # now see the linked PR's real content directly, the same way the
+        # Reviewer already gets the issue attached as source_issue.
+        developer_marker = {
+            "body": "<!-- agent-army:result role=developer from=ready-for-development "
+            "next=needs-optimization-review pr=9 branch=agent-army/issue-7-test-issue head=developer-sha -->"
+        }
+        github = FakeWorkflowGitHub(["needs-decision"], [developer_marker])
+        executor = FakeExecutor(project_owner_decision_result())
+
+        outcome = self.make_orchestrator(github, executor).run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        pull_request = executor.requests[0].work_item.get("pull_request")
+        self.assertIsNotNone(pull_request)
+        self.assertEqual(pull_request["head"], "agent-army/issue-7-test-issue")
 
     def test_reviewer_check_run_failure_does_not_block_transition_or_rerun_executor(self) -> None:
         # A permissions error creating the check run (seen in production as a
@@ -263,6 +308,7 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         self.assertIn("403", outcome.detail or "")
         self.assertEqual(github.labels, ["ready-for-merge"])
         self.assertEqual(len(github.checks), 0)
+        self.assertEqual(len(github.pr_comments), 1)
         self.assertEqual(len(github.comments), 2)
         self.assertEqual(len(executor.requests), 1)
 

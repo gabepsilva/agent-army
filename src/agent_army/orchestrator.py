@@ -31,6 +31,7 @@ from agent_army.publishers import (
     WORKFLOW_STATES,
     render_developer_blocked_result,
     render_developer_result,
+    render_optimization_review_marker_comment,
     render_optimization_review_result,
     render_orchestration_result,
     render_requirements_challenge_result,
@@ -282,6 +283,7 @@ class IssueOrchestrator:
             return OrchestrationOutcome("recovered", target.number, task.agent.name)
 
         invocation_id = self._id_factory()
+        self._attach_linked_pull_request(work_item)
 
         try:
             execution = task.agent.executor.execute(
@@ -700,6 +702,7 @@ class IssueOrchestrator:
             )
         pull_number = int(developer_marker["pr"])
         pull_target = GitHubTarget(self.owner, self.repository, pull_number, "pull_request")
+        pull_conversation_target = GitHubTarget(self.owner, self.repository, pull_number, "issue")
         pull_request = self._reviewer_github.get_pull_request(pull_target)
         head_sha = str(pull_request["head"]["sha"])
         comments = work_item["issue"].get("comments", [])
@@ -717,8 +720,19 @@ class IssueOrchestrator:
         if existing_check is not None:
             summary = str(existing_check.get("output", {}).get("summary") or "")
             try:
-                self._reviewer_github.create_issue_comment(target, summary)
-                next_state = self._marker_next_state(summary)
+                attributes = self._review_marker_attributes(summary)
+                next_state = attributes["next"]
+                issue_comment = render_optimization_review_marker_comment(
+                    invocation_id=attributes.get("invocation") or self._id_factory(),
+                    source_state=attributes["from"],
+                    next_state=next_state,
+                    outcome=attributes["outcome"],
+                    pull_request_number=pull_number,
+                    branch=attributes.get("branch", pull_request["head"]["ref"]),
+                    head_sha=attributes.get("head", head_sha),
+                    pull_request_url=pull_request["html_url"],
+                )
+                self._reviewer_github.create_issue_comment(target, issue_comment)
                 self._apply_transition(target, work_item, task, next_state)
             except Exception as error:
                 return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
@@ -754,15 +768,26 @@ class IssueOrchestrator:
                 if status.stdout.strip():
                     raise ValueError("Optimization Reviewer modified the review workspace.")
             next_state = REVIEW_OUTCOME_STATES[result["outcome"]]
-            comment = render_optimization_review_result(
+            invocation_id = self._id_factory()
+            full_comment = render_optimization_review_result(
                 result,
                 source_state=task.source_state,
                 next_state=next_state,
-                invocation_id=self._id_factory(),
+                invocation_id=invocation_id,
                 pull_request_number=pull_number,
                 pull_request_url=pull_request["html_url"],
                 branch=pull_request["head"]["ref"],
                 head_sha=head_sha,
+            )
+            issue_comment = render_optimization_review_marker_comment(
+                invocation_id=invocation_id,
+                source_state=task.source_state,
+                next_state=next_state,
+                outcome=result["outcome"],
+                pull_request_number=pull_number,
+                branch=pull_request["head"]["ref"],
+                head_sha=head_sha,
+                pull_request_url=pull_request["html_url"],
             )
             conclusion = {
                 "approved": "success",
@@ -777,7 +802,7 @@ class IssueOrchestrator:
                     name=OPTIMIZATION_REVIEW_CHECK_NAME,
                     head_sha=head_sha,
                     conclusion=conclusion,
-                    summary=comment,
+                    summary=full_comment,
                     details_url=pull_request["html_url"],
                 )
             except Exception as error:
@@ -786,7 +811,14 @@ class IssueOrchestrator:
                 # another full agent run on the next poll just because this
                 # call failed (e.g. a transient permissions error).
                 check_run_error = str(error)
-            self._reviewer_github.create_issue_comment(target, comment)
+            # The full review -- evidence, questions, recommended actions --
+            # is posted on the pull request, next to the diff and discussion
+            # it's about. The issue only gets the durable marker and a
+            # pointer: any issue-side agent that needs the full findings gets
+            # them directly via _attach_linked_pull_request instead of
+            # requiring them to be duplicated here.
+            self._reviewer_github.create_issue_comment(pull_conversation_target, full_comment)
+            self._reviewer_github.create_issue_comment(target, issue_comment)
             self._apply_transition(target, work_item, task, next_state)
         except Exception as error:
             return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
@@ -796,6 +828,28 @@ class IssueOrchestrator:
                 f"Optimization Review check run could not be created: {check_run_error}",
             )
         return OrchestrationOutcome("processed", target.number, task.agent.name)
+
+    def _attach_linked_pull_request(self, work_item: dict[str, Any]) -> None:
+        """Give issue-side agents (mainly Project Owner) the linked PR's real
+        content -- diff, reviews, discussion -- directly, the same way
+        _run_reviewer_task already attaches the issue as `source_issue` for
+        the Reviewer. This is what lets the Optimization Reviewer stop
+        duplicating its full write-up onto the issue: any agent that needs
+        the full findings gets them here instead. Best-effort: a PR-read
+        failure should not block the issue-side task, which can still
+        proceed with issue-only context.
+        """
+        if self._review_reader is None:
+            return
+        marker = self._find_developer_marker(work_item["issue"].get("comments", []))
+        if marker is None:
+            return
+        pull_target = GitHubTarget(self.owner, self.repository, int(marker["pr"]), "pull_request")
+        try:
+            pull_work_item = self._review_reader.read(pull_target)
+        except Exception:
+            return
+        work_item["pull_request"] = pull_work_item["pull_request"]
 
     def _find_developer_marker(self, comments: Iterable[dict[str, Any]]) -> dict[str, str] | None:
         for attributes in reversed(list(_iter_markers(comments))):
@@ -918,13 +972,14 @@ class IssueOrchestrator:
         return None
 
     @staticmethod
-    def _marker_next_state(summary: str) -> str:
+    def _review_marker_attributes(summary: str) -> dict[str, str]:
         markers = list(_iter_markers([{"body": summary}]))
         for attributes in reversed(markers):
-            if attributes.get("role") == OPTIMIZATION_REVIEWER:
-                next_state = attributes.get("next")
-                if next_state in REVIEW_OUTCOME_STATES.values():
-                    return next_state
+            if (
+                attributes.get("role") == OPTIMIZATION_REVIEWER
+                and attributes.get("next") in REVIEW_OUTCOME_STATES.values()
+            ):
+                return attributes
         raise ValueError("Optimization Review check has no recoverable transition.")
 
     def _apply_transition(

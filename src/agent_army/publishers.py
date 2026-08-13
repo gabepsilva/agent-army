@@ -339,6 +339,43 @@ def render_optimization_review_result(
     return "\n".join(lines)
 
 
+def render_optimization_review_marker_comment(
+    *,
+    invocation_id: str,
+    source_state: str,
+    next_state: str,
+    outcome: str,
+    pull_request_number: int,
+    pull_request_url: str,
+    branch: str,
+    head_sha: str,
+) -> str:
+    """Render the durable issue-side marker for a review outcome.
+
+    The full findings (evidence, questions, recommended actions) belong on
+    the pull request, next to the diff and discussion they're about. The
+    issue only needs the durable marker plus enough for a human skimming the
+    issue to know what happened and where to read the rest.
+    """
+    return "\n".join(
+        [
+            f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
+            f"from={source_state} next={next_state} outcome={outcome} "
+            f"pr={pull_request_number} branch={branch} head={head_sha} -->",
+            "## Agent Army: Optimization Reviewer completed",
+            "",
+            f"Outcome: **{outcome}**",
+            "",
+            f"Full review: [pull request #{pull_request_number}]({pull_request_url})",
+            f"Commit reviewed: `{head_sha}`",
+            f"Workflow transition: `{source_state}` → `{next_state}`.",
+            "",
+            "_The full findings were posted on the pull request; this comment is "
+            "the durable workflow record._",
+        ]
+    )
+
+
 def render_requirements_challenge_result(
     result: dict[str, Any],
     *,
