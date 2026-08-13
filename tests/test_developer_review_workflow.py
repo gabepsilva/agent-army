@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from agent_army.git_worktrees import WorktreeResult
+from agent_army.agent_executor import AgentExecutionResult
 from agent_army.orchestrator import IssueOrchestrator
 from agent_army.work_items import WorkItemReader
 
@@ -126,9 +127,9 @@ class FakeExecutor:
         self.result = result
         self.requests = []
 
-    def execute(self, request) -> dict:
+    def execute(self, request) -> AgentExecutionResult:
         self.requests.append(request)
-        return self.result
+        return AgentExecutionResult(output=self.result, backend="claude", cost_usd=0.25)
 
 
 class FakeWorktree:
@@ -261,6 +262,96 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(task)
         self.assertEqual(task.agent.name, "optimization-reviewer")
         self.assertEqual(task.source_state, "needs-optimization-review")
+
+    def test_pushed_branch_with_no_open_pr_opens_pr_without_rerunning_executor(self) -> None:
+        # Simulates a prior run where commit_and_push succeeded but
+        # create_pull_request then failed (for example, a missing App
+        # permission): the branch already carries commits ahead of main, but
+        # no open pull request exists for it yet.
+        def git_runner(command, **kwargs):
+            if command[1:4] == ["show-ref", "--verify", "--quiet"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if command[-3:-1] == ["rev-list", "--count"]:
+                return subprocess.CompletedProcess(command, 0, stdout="2\n", stderr="")
+            if command[-2] == "rev-parse":
+                return subprocess.CompletedProcess(command, 0, stdout="pushed-sha\n", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        github = FakeWorkflowGitHub(["ready-for-development"])
+        executor = FakeExecutor(developer_result())
+        orchestrator = IssueOrchestrator(
+            repository="acme/widgets",
+            project_owner_github=github,
+            documentation_github=github,
+            developer_github=github,
+            reviewer_github=github,
+            workspace=Path("/workspace"),
+            project_owner_role=Path("agents/project-owner/ROLE.md"),
+            documentation_role=Path("agents/documentation/ROLE.md"),
+            developer_role=Path("agents/developer/ROLE.md"),
+            reviewer_role=Path("agents/optimization-reviewer/ROLE.md"),
+            output_schema_path=Path("schemas/orchestrator-result.schema.json"),
+            developer_output_schema_path=Path("schemas/developer-result.schema.json"),
+            reviewer_output_schema_path=Path("schemas/optimization-review-result.schema.json"),
+            executor=executor,
+            work_item_reader=WorkItemReader(github),
+            worktree_factory=lambda repository, **kwargs: FakeWorktree(kwargs["branch"]),
+            git_command_runner=git_runner,
+        )
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "recovered")
+        self.assertEqual(github.labels, ["needs-optimization-review"])
+        # The executor must not run again -- there is nothing left to implement.
+        self.assertEqual(executor.requests, [])
+        self.assertEqual(len(github.comments), 1)
+        self.assertIn("pull/9", github.comments[0]["body"])
+        self.assertIn("could not be created at that time", github.comments[0]["body"])
+
+    def test_pushed_branch_not_ahead_of_base_still_reruns_executor(self) -> None:
+        # A branch can exist locally without carrying new work (for example, a
+        # failed first attempt that created the branch but never committed).
+        # That case must still fall through to a normal Developer run.
+        def git_runner(command, **kwargs):
+            if command[1:4] == ["show-ref", "--verify", "--quiet"]:
+                return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+            if command[-3:-1] == ["rev-list", "--count"]:
+                return subprocess.CompletedProcess(command, 0, stdout="0\n", stderr="")
+            if command[-2:] == ["rev-parse", "main"]:
+                return subprocess.CompletedProcess(command, 0, stdout="base-sha\n", stderr="")
+            if command[-2:] == ["rev-parse", "HEAD"]:
+                return subprocess.CompletedProcess(command, 0, stdout="developer-sha\n", stderr="")
+            if command[-2:] == ["status", "--porcelain"]:
+                return subprocess.CompletedProcess(command, 0, stdout=" M src/example.py\n", stderr="")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        github = FakeWorkflowGitHub(["ready-for-development"])
+        executor = FakeExecutor(developer_result())
+        orchestrator = IssueOrchestrator(
+            repository="acme/widgets",
+            project_owner_github=github,
+            documentation_github=github,
+            developer_github=github,
+            reviewer_github=github,
+            workspace=Path("/workspace"),
+            project_owner_role=Path("agents/project-owner/ROLE.md"),
+            documentation_role=Path("agents/documentation/ROLE.md"),
+            developer_role=Path("agents/developer/ROLE.md"),
+            reviewer_role=Path("agents/optimization-reviewer/ROLE.md"),
+            output_schema_path=Path("schemas/orchestrator-result.schema.json"),
+            developer_output_schema_path=Path("schemas/developer-result.schema.json"),
+            reviewer_output_schema_path=Path("schemas/optimization-review-result.schema.json"),
+            executor=executor,
+            work_item_reader=WorkItemReader(github),
+            worktree_factory=lambda repository, **kwargs: FakeWorktree(kwargs["branch"]),
+            git_command_runner=git_runner,
+        )
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertEqual(len(executor.requests), 1)
 
 
 if __name__ == "__main__":

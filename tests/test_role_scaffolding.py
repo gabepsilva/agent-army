@@ -3,7 +3,7 @@ from pathlib import Path
 
 import yaml
 
-from agent_army.codex_executor import role_reference_paths
+from agent_army.agent_executor import role_reference_paths
 
 
 ROOT = Path(__file__).parents[1]

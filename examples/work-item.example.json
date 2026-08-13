@@ -1,0 +1,13 @@
+{
+  "target": {
+    "owner": "gabepsilva",
+    "repository": "agent_army",
+    "number": 0,
+    "kind": "issue"
+  },
+  "title": "Document how the README describes running an agent",
+  "body": "Read README.md in this repository and report whether it explains clearly enough how an operator starts an agent run. Do not modify any files. Keep the analysis to a few points.",
+  "state": "open",
+  "labels": ["documentation"],
+  "comments": []
+}

@@ -1,0 +1,60 @@
+# Agent Army runtime configuration.
+#
+# This file selects which coding-agent CLI executes role cards. Everything else
+# about a run -- role cards, GitHub Apps, output schemas -- is unchanged by this
+# choice. Both backends are held to the same JSON Schemas in schemas/, so the
+# orchestrator's validators and publishers cannot tell them apart.
+#
+# Settings here are the repository-wide default. Each agent may override them in
+# its own agents/<role>/agent-config.yaml under a `runtime:` section, and
+# --backend on any entry point overrides both for a single run:
+#
+#   --backend flag  >  agent-config.yaml  >  config.yaml  >  built-in defaults
+
+# Which CLI runs role cards: "codex" or "claude".
+backend: codex
+
+backends:
+  codex:
+    # Codex sandbox profile. "workspace-write" confines writes to the workspace
+    # and denies network access, which is what the untrusted-work-item prompt
+    # framing assumes. Only widen this deliberately.
+    sandbox: workspace-write
+
+    # Reserved: not yet wired into the Codex command line. Dummy placeholders
+    # so this section carries the same shape as backends.claude.
+    model: o3
+    reasoning_effort: medium
+
+  claude:
+    # Claude Code has no OS-level sandbox equivalent to Codex's workspace-write,
+    # so confinement comes from the permission mode instead:
+    #
+    #   acceptEdits       File edits apply without prompting. Other tools follow
+    #                     the normal permission rules, including any allowlist in
+    #                     ~/.claude/settings.json; anything still requiring a
+    #                     prompt is denied, because -p mode cannot answer one.
+    #                     Denials are reported rather than silently dropped.
+    #   bypassPermissions No confinement at all. Prefer this only when the
+    #                     workspace is disposable -- the orchestrator's isolated
+    #                     git worktree qualifies.
+    #   dontAsk / auto    Intermediate; see `claude --help`.
+    #
+    # Set deliberately to bypassPermissions: this project accepts running Claude
+    # unconfined in exchange for capability parity with Codex. Orchestrated runs
+    # execute in isolated git worktrees; direct `execute-agent --workspace .`
+    # runs do not, so point it at a workspace you are willing to lose.
+    permission_mode: bypassPermissions
+
+    # Pin a model, or leave empty to use the Claude Code default.
+    model: claude-sonnet-5
+
+    # Reasoning effort: low, medium, high, xhigh, or max. Leave empty to use
+    # the Claude Code default.
+    effort: medium
+
+    # Known asymmetry, accepted: Claude Code loads CLAUDE.md, user settings,
+    # hooks, and skills from the workspace and ~/.claude, while Codex runs with
+    # --ephemeral and sees none of it. Claude's --bare flag would suppress that,
+    # but it also forces ANTHROPIC_API_KEY-only auth, which cannot work while
+    # provider keys are stripped from the agent environment.

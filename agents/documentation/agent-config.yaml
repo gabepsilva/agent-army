@@ -12,3 +12,16 @@ github_app:
   app_id: 4577311
   client_id: Iv23lilNYyvO8UXdkiWw
   private_key_secret_ref: agent-army/documentation/github-app-private-key
+
+# Which coding-agent CLI runs this role. Every key is optional and layers over
+# the repository-wide defaults in config.yaml; a --backend flag beats both.
+runtime:
+  backend: claude
+  codex:
+    sandbox: workspace-write
+    model: o3
+    reasoning_effort: medium
+  claude:
+    permission_mode: bypassPermissions
+    model: claude-sonnet-5
+    effort: medium

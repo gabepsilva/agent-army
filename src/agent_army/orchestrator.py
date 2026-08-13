@@ -5,14 +5,16 @@ from __future__ import annotations
 import re
 import time
 import uuid
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_army.codex_executor import (
+from agent_army.agent_executor import (
+    AgentExecutionRequest,
+    AgentExecutor,
     CodexCliExecutor,
-    CodexExecutionRequest,
     role_reference_paths,
 )
 from agent_army.github_app import GitHubAppClient, GitHubTarget
@@ -57,6 +59,7 @@ class OrchestratedAgent:
     role_path: Path
     github: GitHubAppClient
     output_schema_path: Path
+    executor: AgentExecutor
 
 
 @dataclass(frozen=True)
@@ -83,9 +86,9 @@ ATTRIBUTE_PATTERN = re.compile(r"(?P<key>[a-z_]+)=(?P<value>[^\s]+)")
 class IssueOrchestrator:
     """Poll one repository and run at most one state-changing task per pass.
 
-    GitHub clients are intentionally injected separately from the Codex executor.
+    GitHub clients are intentionally injected separately from the agent executor.
     The clients retain credentials inside this Python process; only normalized
-    work-item data is sent to Codex.
+    work-item data is sent to the agent CLI.
     """
 
     def __init__(
@@ -105,7 +108,8 @@ class IssueOrchestrator:
         developer_output_schema_path: Path | None = None,
         reviewer_output_schema_path: Path | None = None,
         requirements_challenge_output_schema_path: Path | None = None,
-        executor: CodexCliExecutor | None = None,
+        executor: AgentExecutor | None = None,
+        executors: Mapping[str, AgentExecutor] | None = None,
         work_item_reader: WorkItemReader | None = None,
         id_factory: Callable[[], str] | None = None,
         worktree_factory: Callable[..., Any] | None = None,
@@ -115,7 +119,12 @@ class IssueOrchestrator:
         self._project_owner_github = project_owner_github
         self._workspace = workspace
         self._output_schema_path = output_schema_path
-        self._executor = executor or CodexCliExecutor()
+        default_executor = executor or CodexCliExecutor()
+        # Each role may run on its own backend; anything unlisted inherits the
+        # repository-wide default.
+        per_agent = dict(executors or {})
+        self._executor_for = lambda name: per_agent.get(name, default_executor)
+        self._total_cost_usd = 0.0
         self._reader = work_item_reader or WorkItemReader(project_owner_github)
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self._worktree_factory = worktree_factory or IsolatedGitWorktree
@@ -127,6 +136,7 @@ class IssueOrchestrator:
                 project_owner_role,
                 project_owner_github,
                 output_schema_path,
+                self._executor_for(PROJECT_OWNER),
             ),
             DOCUMENTATION: OrchestratedAgent(
                 DOCUMENTATION,
@@ -134,6 +144,7 @@ class IssueOrchestrator:
                 documentation_role,
                 documentation_github,
                 output_schema_path,
+                self._executor_for(DOCUMENTATION),
             ),
         }
         if developer_github and developer_role and developer_output_schema_path:
@@ -143,6 +154,7 @@ class IssueOrchestrator:
                 developer_role,
                 developer_github,
                 developer_output_schema_path,
+                self._executor_for(DEVELOPER),
             )
         if reviewer_github and reviewer_role and reviewer_output_schema_path:
             self._agents[OPTIMIZATION_REVIEWER] = OrchestratedAgent(
@@ -151,10 +163,16 @@ class IssueOrchestrator:
                 reviewer_role,
                 reviewer_github,
                 reviewer_output_schema_path,
+                self._executor_for(OPTIMIZATION_REVIEWER),
             )
         self._reviewer_github = reviewer_github
         self._review_reader = WorkItemReader(reviewer_github) if reviewer_github else None
         self._requirements_challenge_schema_path = requirements_challenge_output_schema_path
+
+    @property
+    def total_cost_usd(self) -> float:
+        """Reported spend so far. Codex runs report 0.0; see AgentExecutionResult."""
+        return self._total_cost_usd
 
     def run_once(self) -> OrchestrationOutcome:
         """Process the lowest-numbered eligible open issue, if there is one."""
@@ -266,8 +284,8 @@ class IssueOrchestrator:
         invocation_id = self._id_factory()
 
         try:
-            result = self._executor.execute(
-                CodexExecutionRequest(
+            execution = task.agent.executor.execute(
+                AgentExecutionRequest(
                     role_path=task.agent.role_path,
                     workspace=self._workspace,
                     work_item=work_item,
@@ -277,6 +295,8 @@ class IssueOrchestrator:
                     ),
                 )
             )
+            self._total_cost_usd += execution.cost_usd
+            result = execution.output
             validate_orchestration_result(
                 result,
                 task.agent.name,
@@ -305,7 +325,7 @@ class IssueOrchestrator:
             self._apply_transition(target, work_item, task, next_state)
         except Exception as error:
             # The result comment is durable, so the next pass can retry only this
-            # label update instead of invoking Codex again.
+            # label update instead of invoking the agent again.
             return OrchestrationOutcome(
                 "retrying-label-update", target.number, task.agent.name, str(error)
             )
@@ -344,8 +364,8 @@ class IssueOrchestrator:
             "prior_round": challenge_round - 1 or None,
         }
         try:
-            result = self._executor.execute(
-                CodexExecutionRequest(
+            execution = task.agent.executor.execute(
+                AgentExecutionRequest(
                     role_path=task.agent.role_path,
                     workspace=self._workspace,
                     work_item=challenge_work_item,
@@ -355,6 +375,8 @@ class IssueOrchestrator:
                     ),
                 )
             )
+            self._total_cost_usd += execution.cost_usd
+            result = execution.output
             validate_requirements_challenge_result(result, challenge_round)
             comment = render_requirements_challenge_result(
                 result,
@@ -403,6 +425,16 @@ class IssueOrchestrator:
             branch,
             **({"command_runner": self._git_command_runner} if self._git_command_runner else {}),
         )
+        if branch_exists and self._branch_is_ahead(branch, base_branch):
+            # A prior run already committed and pushed this branch -- most likely
+            # create_pull_request failed after a successful push (for example, a
+            # missing App permission) -- and left the issue in ready-for-development
+            # with nothing new to implement. Re-running the executor here would only
+            # find an empty diff and fail again on every retry. Open the pull request
+            # for the existing commits instead of re-invoking the executor.
+            return self._open_pull_request_for_pushed_branch(
+                target, work_item, task, branch, base_branch, title
+            )
         base_ref = branch if branch_exists else base_branch
         try:
             base_sha = run_git(
@@ -426,8 +458,8 @@ class IssueOrchestrator:
                 create_branch=not branch_exists,
                 **({"command_runner": self._git_command_runner} if self._git_command_runner else {}),
             ) as worktree:
-                result = self._executor.execute(
-                    CodexExecutionRequest(
+                execution = task.agent.executor.execute(
+                    AgentExecutionRequest(
                         role_path=task.agent.role_path,
                         workspace=worktree.path,
                         work_item=work_item,
@@ -435,6 +467,8 @@ class IssueOrchestrator:
                         reference_paths=role_reference_paths(task.agent.role_path),
                     )
                 )
+                self._total_cost_usd += execution.cost_usd
+                result = execution.output
                 validate_developer_result(result)
                 if result["status"] == "blocked":
                     comment = render_developer_blocked_result(
@@ -512,8 +546,8 @@ class IssueOrchestrator:
                 create_branch=False,
                 **({"command_runner": self._git_command_runner} if self._git_command_runner else {}),
             ) as worktree:
-                result = self._executor.execute(
-                    CodexExecutionRequest(
+                execution = task.agent.executor.execute(
+                    AgentExecutionRequest(
                         role_path=task.agent.role_path,
                         workspace=worktree.path,
                         work_item=implementation_work_item,
@@ -521,6 +555,8 @@ class IssueOrchestrator:
                         reference_paths=role_reference_paths(task.agent.role_path),
                     )
                 )
+                self._total_cost_usd += execution.cost_usd
+                result = execution.output
                 validate_developer_result(result)
                 if result["status"] != "completed":
                     return OrchestrationOutcome(
@@ -582,6 +618,76 @@ class IssueOrchestrator:
             )
         return OrchestrationOutcome("recovered", target.number, task.agent.name)
 
+    def _branch_is_ahead(self, branch: str, base_branch: str) -> bool:
+        """Whether `branch` already carries commits `base_branch` does not.
+
+        Used only to decide whether a prior Developer run already finished and
+        pushed; any failure to answer safely falls back to False, which simply
+        re-runs the executor as before.
+        """
+        try:
+            count = run_git(
+                ["git", "rev-list", "--count", f"{base_branch}..{branch}"],
+                self._workspace,
+                **({"command_runner": self._git_command_runner} if self._git_command_runner else {}),
+            ).stdout.strip()
+        except RuntimeError:
+            return False
+        return count not in ("", "0")
+
+    def _open_pull_request_for_pushed_branch(
+        self,
+        target: GitHubTarget,
+        work_item: dict[str, Any],
+        task: _Task,
+        branch: str,
+        base_branch: str,
+        title: str,
+    ) -> OrchestrationOutcome:
+        """Open the pull request for a branch a prior run already pushed.
+
+        No new implementation work happens here -- the branch already carries
+        it. This exists for the case where commit_and_push previously
+        succeeded but create_pull_request then failed (for example, the App
+        installation was missing the Pull requests permission), leaving the
+        issue in ready-for-development with nothing left to implement.
+        """
+        try:
+            head_sha = run_git(
+                ["git", "rev-parse", branch],
+                self._workspace,
+                **({"command_runner": self._git_command_runner} if self._git_command_runner else {}),
+            ).stdout.strip()
+            pull_request = task.agent.github.create_pull_request(
+                self.owner,
+                self.repository,
+                title=f"Implement #{target.number}: {title}",
+                head=branch,
+                base=base_branch,
+                body=(
+                    f"Implements #{target.number}.\n\n"
+                    "A previous Developer run committed and pushed this branch, but the "
+                    "pull request could not be opened at the time. No further "
+                    "implementation changes were made; this pull request forwards the "
+                    "existing commit(s) for review."
+                ),
+            )
+            next_state = "needs-optimization-review"
+            comment = (
+                f"<!-- agent-army:result role=developer from={task.source_state} "
+                f"next={next_state} pr={pull_request['number']} branch={branch} "
+                f"head={head_sha} -->\n"
+                "## Agent Army: Developer PR opened\n\n"
+                "A previous run already implemented and pushed this branch; the pull "
+                "request could not be created at that time. It is now open: "
+                f"[{pull_request['html_url']}]({pull_request['html_url']})."
+            )
+            task.agent.github.create_issue_comment(target, comment)
+            self._apply_transition(target, work_item, task, next_state)
+        except Exception as error:
+            return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
+        return OrchestrationOutcome("recovered", target.number, task.agent.name)
+
     def _run_reviewer_task(
         self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
     ) -> OrchestrationOutcome:
@@ -628,8 +734,8 @@ class IssueOrchestrator:
                 create_branch=False,
                 **({"command_runner": self._git_command_runner} if self._git_command_runner else {}),
             ) as worktree:
-                result = self._executor.execute(
-                    CodexExecutionRequest(
+                execution = task.agent.executor.execute(
+                    AgentExecutionRequest(
                         role_path=task.agent.role_path,
                         workspace=worktree.path,
                         work_item=review_work_item,
@@ -637,6 +743,8 @@ class IssueOrchestrator:
                         reference_paths=role_reference_paths(task.agent.role_path),
                     )
                 )
+                self._total_cost_usd += execution.cost_usd
+                result = execution.output
                 validate_optimization_review_result(result, head_sha)
                 status = run_git(
                     ["git", "status", "--porcelain"],
@@ -867,9 +975,10 @@ def _parse_repository(repository: str) -> tuple[str, str]:
 
 
 def _format_outcome(outcome: OrchestrationOutcome) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     if outcome.status == "idle":
-        return "Agent Army poll complete: no eligible issue."
+        return f"[{timestamp}] Agent Army poll complete: no eligible issue."
     issue = f" issue #{outcome.issue_number}" if outcome.issue_number else ""
     role = f" ({outcome.role})" if outcome.role else ""
     detail = f": {outcome.detail}" if outcome.detail else ""
-    return f"Agent Army poll complete: {outcome.status}{issue}{role}{detail}"
+    return f"[{timestamp}] Agent Army poll complete: {outcome.status}{issue}{role}{detail}"

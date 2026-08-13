@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 
+from agent_army.agent_executor import AgentExecutionResult
 from agent_army.orchestrator import IssueOrchestrator
 from agent_army.work_items import WorkItemReader
 
@@ -82,10 +83,12 @@ class FakeExecutor:
         self.calls = 0
         self.requests = []
 
-    def execute(self, request) -> dict:
+    def execute(self, request) -> AgentExecutionResult:
         self.calls += 1
         self.requests.append(request)
-        return self.results.pop(0)
+        return AgentExecutionResult(
+            output=self.results.pop(0), backend="codex", cost_usd=0.0
+        )
 
 
 class IssueOrchestratorTests(unittest.TestCase):
