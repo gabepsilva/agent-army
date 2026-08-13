@@ -1,0 +1,14 @@
+# Runtime contract for the documentation agent.
+# Keep private-key material in the password store, never in this repository.
+
+agent:
+  name: Doku
+  role_file: ROLE.md
+  invocation_modes:
+    - issue_grooming
+    - pull_request_review
+
+github_app:
+  app_id: 4577311
+  client_id: Iv23lilNYyvO8UXdkiWw
+  private_key_secret_ref: agent-army/documentation/github-app-private-key

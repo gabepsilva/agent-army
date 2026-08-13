@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-army"
+version = "0.1.0"
+description = "Runtime foundation for GitHub-backed agents"
+requires-python = ">=3.11"
+dependencies = [
+  "PyJWT[crypto]>=2.10,<3",
+  "PyYAML>=6,<7",
+]
+
+[project.scripts]
+verify-documentation-agent = "agent_army.verify_documentation_agent:main"
+read-documentation-task = "agent_army.read_documentation_task:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
