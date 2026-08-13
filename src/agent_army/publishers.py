@@ -82,6 +82,36 @@ _RECHECKABLE_PATTERNS = (
 _PAYLOAD_PATTERN = re.compile(r"<!-- agent-army:payload (?P<payload>\{.*?\}) -->", re.DOTALL)
 
 
+# Agents occasionally emit "\\n" inside a JSON string instead of a real
+# newline, which renders on GitHub as a literal backslash-n and turns the
+# durable record -- the one artifact a human actually reads -- into an
+# unreadable run-on blob. Repairing that blindly would corrupt legitimate
+# content, since these roles routinely discuss code: a finding arguing for
+# `\n` over `\r\n` must survive intact. Two guards keep the repair narrow:
+# text that already contains real newlines is left alone (the agent formatted
+# it properly, so any escape in it is deliberate), and inline-code spans are
+# never touched.
+_INLINE_CODE_PATTERN = re.compile(r"(`[^`]*`)")
+
+
+def normalize_escaped_newlines(text: str) -> str:
+    """Repair whole-string newline escaping without touching real content."""
+    if "\n" in text or "\\n" not in text:
+        return text
+    parts = _INLINE_CODE_PATTERN.split(text)
+    return "".join(
+        part
+        if index % 2
+        else part.replace("\\r\\n", "\n").replace("\\n", "\n").replace("\\t", "\t")
+        for index, part in enumerate(parts)
+    )
+
+
+def _prose(text: str) -> str:
+    """Agent-authored prose, ready to render."""
+    return normalize_escaped_newlines(text.strip())
+
+
 def _is_recheckable(text: str) -> bool:
     return any(pattern.search(text) for pattern in _RECHECKABLE_PATTERNS)
 
@@ -138,7 +168,7 @@ def validate_analysis_result(result: dict[str, Any]) -> None:
 def render_documentation_analysis(result: dict[str, Any]) -> str:
     """Render an issue-grooming report without exposing internal execution details."""
     validate_analysis_result(result)
-    lines = ["## Doku: documentation analysis", "", result["summary"].strip()]
+    lines = ["## Doku: documentation analysis", "", _prose(result["summary"])]
     _append_section(lines, "Evidence", result["evidence"])
     _append_section(lines, "Questions to resolve", result["questions"])
     _append_section(lines, "Recommended next steps", result["recommended_actions"])
@@ -327,7 +357,7 @@ def render_developer_blocked_result(
         f"from={source_state} next={next_state} status=blocked -->",
         "## Agent Army: Developer needs a decision",
         "",
-        result["summary"].strip(),
+        _prose(result["summary"]),
         "",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
     ]
@@ -404,7 +434,7 @@ def render_orchestration_result(
         "",
         "### Decision" if role == "project-owner" else "### Summary",
         "",
-        result["summary"].strip(),
+        _prose(result["summary"]),
         "",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
     ]
@@ -444,7 +474,7 @@ def render_developer_result(
         encode_payload({"responses": responses}),
         "## Agent Army: Developer completed",
         "",
-        result["summary"].strip(),
+        _prose(result["summary"]),
         "",
         f"Pull request: [{pull_request_url}]({pull_request_url})",
         f"Branch: `{branch}`",
@@ -490,7 +520,7 @@ def render_optimization_review_result(
         "",
         f"Outcome: **{outcome}**",
         "",
-        result["summary"].strip(),
+        _prose(result["summary"]),
         "",
         f"Pull request: [{pull_request_url}]({pull_request_url})",
         f"Commit reviewed: `{head_sha}`",
@@ -511,9 +541,9 @@ def _append_findings(lines: list[str], findings: list[dict[str, Any]]) -> None:
     order = {BLOCKING: 0, "should-fix": 1, "nit": 2}
     lines.extend(["", "### Findings", ""])
     for finding in sorted(findings, key=lambda item: order.get(item["severity"], 3)):
-        lines.append(f"- **[{finding['severity']}] {finding['id']}** — {finding['claim'].strip()}")
+        lines.append(f"- **[{finding['severity']}] {finding['id']}** — {_prose(finding['claim'])}")
         for item in finding["evidence"]:
-            lines.append(f"  - {item.strip()}")
+            lines.append(f"  - {_prose(item)}")
 
 
 def _append_dispute_responses(lines: list[str], responses: list[dict[str, Any]]) -> None:
@@ -523,7 +553,7 @@ def _append_dispute_responses(lines: list[str], responses: list[dict[str, Any]])
     for response in responses:
         lines.append(
             f"- **{response['finding_id']}: {response['disposition']}** — "
-            f"{response['rationale'].strip()}"
+            f"{_prose(response['rationale'])}"
         )
 
 
@@ -535,7 +565,7 @@ def render_developer_responses(responses: list[dict[str, Any]]) -> list[str]:
     for response in responses:
         lines.append(
             f"- **{response['finding_id']}: {response['disposition']}** — "
-            f"{response['rationale'].strip()}"
+            f"{_prose(response['rationale'])}"
         )
     return lines
 
@@ -655,7 +685,7 @@ def render_requirements_challenge_result(
         "",
         f"Outcome: **{outcome}**",
         "",
-        result["summary"].strip(),
+        _prose(result["summary"]),
         "",
         f"Challenge round: `{challenge_round}`",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
@@ -676,4 +706,4 @@ def _append_section(lines: list[str], title: str, items: list[str]) -> None:
     if not items:
         return
     lines.extend(["", f"### {title}", ""])
-    lines.extend(f"- {item}" for item in items)
+    lines.extend(f"- {_prose(item)}" for item in items)

@@ -2,6 +2,7 @@ import unittest
 
 from agent_army.publishers import (
     REVIEW_OUTCOME_STATES,
+    normalize_escaped_newlines,
     render_documentation_analysis,
     validate_analysis_result,
     validate_optimization_review_result,
@@ -51,6 +52,46 @@ class PlaceholderTextRejectionTests(unittest.TestCase):
         # legitimately short (e.g. a filename); they're intentionally
         # excluded from the placeholder-text guard.
         validate_analysis_result(self._result(files_changed=["a.py"], commands_run=["ls"]))
+
+
+class EscapedNewlineRepairTests(unittest.TestCase):
+    """Issue #13's first Project Owner comment shipped 31 literal backslash-n
+    sequences, rendering the durable decision as one unreadable blob."""
+
+    def test_repairs_a_wholly_escaped_string(self) -> None:
+        self.assertEqual(
+            normalize_escaped_newlines("Decision.\\n\\n**Scope**\\n- item"),
+            "Decision.\n\n**Scope**\n- item",
+        )
+
+    def test_leaves_inline_code_alone(self) -> None:
+        # A finding arguing for one line ending over another must survive.
+        text = "prefer `\\n` over `\\r\\n` in the writer"
+        self.assertEqual(normalize_escaped_newlines(text), text)
+
+    def test_leaves_properly_formatted_text_alone(self) -> None:
+        # Real newlines present means the agent formatted it; any remaining
+        # escape is deliberate content, not the bug.
+        text = "Real line\nand a literal \\n token"
+        self.assertEqual(normalize_escaped_newlines(text), text)
+
+    def test_text_without_escapes_is_untouched(self) -> None:
+        self.assertEqual(normalize_escaped_newlines("plain summary"), "plain summary")
+
+    def test_rendered_comment_has_no_literal_escapes(self) -> None:
+        rendered = render_documentation_analysis(
+            {
+                "summary": "Needs clarification.\\n\\nSecond paragraph here.",
+                "evidence": ["README exists.\\n- nested point"],
+                "questions": ["Who is the audience?"],
+                "recommended_actions": ["Clarify scope."],
+                "files_changed": [],
+                "commands_run": ["tests"],
+            }
+        )
+
+        self.assertNotIn("\\n", rendered)
+        self.assertIn("Second paragraph here.", rendered)
 
 
 class DocumentationAnalysisPublisherTests(unittest.TestCase):
