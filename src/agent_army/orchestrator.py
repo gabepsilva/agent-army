@@ -357,18 +357,37 @@ class IssueOrchestrator:
             return OrchestrationOutcome("recovered", target.number, task.agent.name)
 
         challenge_round = pending_round or self._latest_requirements_challenge_round(comments) + 1
-        if challenge_round not in {1, 2}:
-            return OrchestrationOutcome(
-                "blocked",
-                target.number,
-                task.agent.name,
-                "Requirements challenge round limit reached; Project Owner must resolve or ask for user guidance.",
-            )
+        if challenge_round > MAX_CONVERGENCE_ROUNDS:
+            # The issue-level argument is not converging on its own. Same bound
+            # and same handover as the PR-review loop.
+            try:
+                escalation = render_convergence_escalation(
+                    source_state=task.source_state,
+                    next_state="needs-user-guidance",
+                    invocation_id=self._id_factory(),
+                    pull_request_number=0,
+                    pull_request_url="",
+                    round_number=challenge_round - 1,
+                    open_findings=[
+                        finding
+                        for finding in self._open_challenge_findings(comments)
+                        if finding.get("severity") == BLOCKING
+                    ],
+                )
+                self._reviewer_github.create_issue_comment(target, escalation)
+                self._apply_transition(target, work_item, task, "needs-user-guidance")
+            except Exception as error:
+                return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
+            return OrchestrationOutcome("escalated", target.number, task.agent.name)
+
+        open_disputes = self._open_project_owner_disputes(comments)
         challenge_work_item = dict(work_item)
         challenge_work_item["requirements_challenge"] = {
             "round": challenge_round,
             "prior_round": challenge_round - 1 or None,
         }
+        challenge_work_item["open_disputes"] = open_disputes
+        challenge_work_item["prior_findings"] = self._open_challenge_findings(comments)
         try:
             execution = task.agent.executor.execute(
                 AgentExecutionRequest(
@@ -383,13 +402,14 @@ class IssueOrchestrator:
             )
             self._total_cost_usd += execution.cost_usd
             result = execution.output
-            validate_requirements_challenge_result(result, challenge_round)
+            validate_requirements_challenge_result(result, challenge_round, open_disputes)
             comment = render_requirements_challenge_result(
                 result,
                 source_state=task.source_state,
                 next_state="needs-decision",
                 invocation_id=self._id_factory(),
                 challenge_round=challenge_round,
+                findings=result.get("findings") or [],
             )
             self._reviewer_github.create_issue_comment(target, comment)
             self._apply_transition(target, work_item, task, "needs-decision")
@@ -922,6 +942,26 @@ class IssueOrchestrator:
             if payload:
                 return payload
         return {}
+
+    def _open_challenge_findings(
+        self, comments: Iterable[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """The challenge findings Project Owner must currently answer for."""
+        for comment in reversed(list(comments)):
+            body = str(comment.get("body") or "")
+            if "mode=requirements_challenge" not in body:
+                continue
+            payload = decode_payload(body)
+            if payload:
+                return list(payload.get("findings") or [])
+        return []
+
+    def _open_project_owner_disputes(
+        self, comments: Iterable[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """The Project Owner disputes the Reviewer must concede or hold."""
+        responses = self._latest_payload(comments, PROJECT_OWNER).get("responses") or []
+        return [item for item in responses if item.get("disposition") == "disputed"]
 
     def _open_review_findings(self, comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
         """The findings the Developer must currently answer for."""

@@ -17,6 +17,7 @@ REQUIRED_RESULT_FIELDS = {
 }
 WORKFLOW_STATES = {
     "needs-grooming",
+    "needs-design-signoff",
     "needs-decision",
     "needs-documentation",
     "ready-for-development",
@@ -27,6 +28,7 @@ WORKFLOW_STATES = {
 }
 PROJECT_OWNER_STATES = {
     "needs-grooming",
+    "needs-design-signoff",
     "needs-decision",
     "needs-documentation",
     "ready-for-development",
@@ -67,6 +69,11 @@ REVIEWER_DISPOSITIONS = {"conceded", "held"}
 # is the point at which an unconverged argument stops being productive and gets
 # a human involved instead of quietly spending more on further rounds.
 MAX_CONVERGENCE_ROUNDS = 7
+# The sign-off gate checks whether the write-up faithfully records what was
+# already argued -- not the substance again -- so it gets a smaller budget.
+# Failing to agree on a transcription in three passes is itself the signal.
+MAX_SIGNOFF_ROUNDS = 3
+FINAL_DESIGN_HEADING = "## Final Design:"
 
 # A claim that cannot be re-checked is an opinion. Blocking findings and
 # disputes -- the two moves that cost the other side real work -- must point at
@@ -281,11 +288,14 @@ def validate_developer_result(
             )
 
 
-def validate_review_findings(result: dict[str, Any], open_disputes: list[dict[str, Any]] | None = None) -> None:
-    """Validate a review's findings and its answers to the Developer's disputes.
+def _validate_findings(
+    result: dict[str, Any], open_disputes: list[dict[str, Any]] | None = None
+) -> None:
+    """Validate graded findings and the answers to the other side's disputes.
 
-    The symmetric half of validate_developer_result: a Reviewer may not ignore
-    a dispute. It either concedes the finding or holds it with its own
+    Shared by PR review and the issue-level requirements challenge: the same
+    argument contract applies wherever two roles argue. A reviewer may not
+    ignore a dispute -- it either concedes the finding or holds it with its own
     re-checkable evidence.
     """
     findings = result.get("findings") or []
@@ -307,12 +317,6 @@ def validate_review_findings(result: dict[str, Any], open_disputes: list[dict[st
                 f"Blocking finding {finding_id} requires re-checkable evidence "
                 "(a file:line, a `command`, or a URL)."
             )
-
-    has_blocking = any(finding["severity"] == BLOCKING for finding in findings)
-    if result["outcome"] == "approved" and has_blocking:
-        raise ValueError("A review cannot be approved while a blocking finding is open.")
-    if result["outcome"] == "changes-requested" and not has_blocking:
-        raise ValueError("changes-requested requires at least one blocking finding.")
 
     answered = set()
     for response in result.get("dispute_responses") or []:
@@ -386,13 +390,27 @@ def validate_optimization_review_result(
         raise ValueError("Optimization Reviewer result does not match the current PR commit.")
     if result["files_changed"]:
         raise ValueError("Optimization Reviewer must not change files.")
-    validate_review_findings(result, open_disputes)
+    _validate_findings(result, open_disputes)
+    has_blocking = any(
+        finding["severity"] == BLOCKING for finding in result.get("findings") or []
+    )
+    if result["outcome"] == "approved" and has_blocking:
+        raise ValueError("A review cannot be approved while a blocking finding is open.")
+    if result["outcome"] == "changes-requested" and not has_blocking:
+        raise ValueError("changes-requested requires at least one blocking finding.")
 
 
 def validate_requirements_challenge_result(
-    result: dict[str, Any], expected_round: int
+    result: dict[str, Any],
+    expected_round: int,
+    open_disputes: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Validate an issue-level challenge from the shared Reviewer role."""
+    """Validate an issue-level challenge from the shared Reviewer role.
+
+    The issue-level argument is held to the same contract as PR review: graded
+    findings, re-checkable evidence on anything blocking, and no ignoring a
+    Project Owner dispute.
+    """
     validate_analysis_result(result)
     if result.get("outcome") not in REQUIREMENTS_CHALLENGE_OUTCOMES:
         raise ValueError("Requirements challenge must return a supported outcome.")
@@ -402,6 +420,14 @@ def validate_requirements_challenge_result(
         raise ValueError("Requirements Reviewer must not change files.")
     if len(result["questions"]) > 1:
         raise ValueError("Requirements Reviewer may ask at most one focused question.")
+    _validate_findings(result, open_disputes)
+    has_blocking = any(
+        finding["severity"] == BLOCKING for finding in result.get("findings") or []
+    )
+    if result["outcome"] == "concerns-found" and not has_blocking:
+        raise ValueError("concerns-found requires at least one blocking finding.")
+    if result["outcome"] == "no-material-concerns" and has_blocking:
+        raise ValueError("no-material-concerns cannot leave a blocking finding open.")
 
 
 def render_orchestration_result(
@@ -674,22 +700,31 @@ def render_requirements_challenge_result(
     next_state: str,
     invocation_id: str,
     challenge_round: int,
+    findings: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Render one bounded issue-level requirements challenge."""
+    """Render one round of the issue-level requirements argument."""
     validate_requirements_challenge_result(result, challenge_round)
     outcome = result["outcome"]
+    findings = findings if findings is not None else (result.get("findings") or [])
+    blocking = [finding for finding in findings if finding["severity"] == BLOCKING]
     lines = [
         f"<!-- agent-army:result role=optimization-reviewer mode=requirements_challenge "
         f"from={source_state} next={next_state} round={challenge_round} outcome={outcome} -->",
-        "## Agent Army: requirements challenge completed",
+        encode_payload({"findings": findings, "round": challenge_round}),
+        f"## Agent Army: requirements challenge — round {challenge_round}",
         "",
         f"Outcome: **{outcome}**",
         "",
+        f"Convergence: **{len(blocking)} blocking**, "
+        f"{len([f for f in findings if f['severity'] == 'should-fix'])} should-fix, "
+        f"{len([f for f in findings if f['severity'] == 'nit'])} nit",
+        "",
         _prose(result["summary"]),
         "",
-        f"Challenge round: `{challenge_round}`",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
     ]
+    _append_findings(lines, findings)
+    _append_dispute_responses(lines, result.get("dispute_responses") or [])
     _append_section(lines, "Challenge evidence", result["evidence"])
     _append_section(lines, "Focused question", result["questions"])
     _append_section(lines, "Recommended actions", result["recommended_actions"])

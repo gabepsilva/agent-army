@@ -34,6 +34,15 @@ def challenge_result(round_number: int) -> dict:
         "outcome": "concerns-found",
         "challenge_round": round_number,
         "summary": "The draft needs one scope clarification before implementation.",
+        "findings": [
+            {
+                "id": "C1",
+                "severity": "blocking",
+                "claim": "Empty input behavior is not defined anywhere in the draft.",
+                "evidence": ["src/agent_army/orchestrator.py:212 selects on state alone."],
+            }
+        ],
+        "dispute_responses": [],
         "evidence": ["Empty input behavior is not defined."],
         "questions": ["Should empty input be rejected or treated as no-op?"],
         "recommended_actions": ["Project Owner should record the chosen behavior."],
@@ -197,7 +206,8 @@ class IssueOrchestratorTests(unittest.TestCase):
         self.assertEqual(orchestrator.run_once().status, "processed")
         self.assertEqual(github.labels, ["needs-decision"])
         self.assertEqual(len(github.comments), 2)
-        self.assertIn("requirements challenge completed", github.comments[-1]["body"])
+        self.assertIn("requirements challenge — round 1", github.comments[-1]["body"])
+        self.assertIn("1 blocking", github.comments[-1]["body"])
         self.assertEqual(executor.requests[1].work_item["requirements_challenge"]["round"], 1)
         self.assertEqual(
             executor.requests[1].reference_paths,
