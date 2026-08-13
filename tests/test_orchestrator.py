@@ -3,6 +3,7 @@ from pathlib import Path
 
 from agent_army.agent_executor import AgentExecutionResult
 from agent_army.orchestrator import IssueOrchestrator
+from agent_army.publishers import encode_payload
 from agent_army.work_items import WorkItemReader
 
 
@@ -219,39 +220,77 @@ class IssueOrchestratorTests(unittest.TestCase):
             ),
         )
 
-    def test_only_one_materially_changed_follow_up_challenge_is_allowed(self) -> None:
-        github = FakeGitHub(["needs-grooming"])
-        executor = FakeExecutor(
-            result(
-                next_state="needs-requirements-challenge",
-                challenge_round=1,
-            ),
-            challenge_result(1),
-            result(
-                next_state="needs-requirements-challenge",
-                challenge_round=2,
-            ),
-            challenge_result(2),
-        )
+    def test_project_owner_cannot_ignore_a_blocking_challenge_finding(self) -> None:
+        # The proposer must take a position on every blocking finding. A
+        # resolution that silently omits one is rejected and retried rather
+        # than published, which is what let issue #15 converge in one round.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=1 outcome=concerns-found -->\n"
+                + encode_payload(
+                    {"findings": challenge_result(1)["findings"], "round": 1}
+                )
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        executor = FakeExecutor(result(next_state="needs-design-signoff"))
         orchestrator = self.make_reviewer_orchestrator(github, executor)
 
-        for _ in range(4):
-            self.assertEqual(orchestrator.run_once().status, "processed")
-        self.assertEqual(github.labels, ["needs-decision"])
-        self.assertEqual(len(github.comments), 4)
-        self.assertEqual(executor.calls, 4)
+        outcome = orchestrator.run_once()
 
-        # A second follow-up cannot start a third challenge round.
-        github.labels = ["needs-decision"]
-        executor.results.append(
-            result(
-                next_state="needs-requirements-challenge",
-                challenge_round=2,
-            )
-        )
-        self.assertEqual(orchestrator.run_once().status, "failed")
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("C1", outcome.detail or "")
         self.assertEqual(github.labels, ["needs-decision"])
-        self.assertEqual(len(github.comments), 4)
+
+    def test_an_open_finding_sends_the_resolution_back_for_another_round(self) -> None:
+        # Convergence is the Reviewer's call, not the proposer's: while a
+        # finding is open, a bid for sign-off is redirected to another
+        # challenge round no matter what state Project Owner asked for.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=1 outcome=concerns-found -->\n"
+                + encode_payload(
+                    {"findings": challenge_result(1)["findings"], "round": 1}
+                )
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        resolution = result(next_state="needs-design-signoff")
+        resolution["final_design"] = "The converged scope for this issue."
+        resolution["responses"] = [
+            {
+                "finding_id": "C1",
+                "disposition": "accepted",
+                "rationale": "Defined empty-input behavior in the draft.",
+            }
+        ]
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-requirements-challenge"])
+
+    def test_sign_off_is_reachable_once_no_finding_is_open(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=2 outcome=no-material-concerns -->\n"
+                + encode_payload({"findings": [], "round": 2})
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        resolution = result(next_state="needs-design-signoff")
+        resolution["final_design"] = "The converged scope for this issue."
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-design-signoff"])
 
     def test_second_challenge_state_with_durable_result_only_recovers_label(self) -> None:
         comments = [

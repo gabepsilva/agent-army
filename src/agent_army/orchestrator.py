@@ -322,10 +322,17 @@ class IssueOrchestrator:
                 prior_challenge_round=self._latest_requirements_challenge_round(comments)
                 if task.agent.name == PROJECT_OWNER
                 else None,
+                # Without this the accept-or-dispute contract is unenforced and
+                # Project Owner can ignore a blocking finding outright.
+                open_findings=self._open_challenge_findings(comments)
+                if task.agent.name == PROJECT_OWNER
+                else None,
             )
             next_state = (
                 result["next_state"] if task.agent.name == PROJECT_OWNER else "needs-decision"
             )
+            if task.agent.name == PROJECT_OWNER:
+                next_state = self._route_past_open_findings(comments, next_state, result)
             self._validate_transition(task.source_state, next_state, task.agent.name)
             comment = render_orchestration_result(
                 result,
@@ -1093,6 +1100,33 @@ class IssueOrchestrator:
             if payload:
                 return payload
         return {}
+
+    def _route_past_open_findings(
+        self, comments: Iterable[dict[str, Any]], next_state: str, result: dict[str, Any]
+    ) -> str:
+        """Keep scope with the Reviewer until it agrees the argument is over.
+
+        The proposer must not be the one who decides its own proposal has
+        converged -- it has every incentive to declare victory, which is why
+        an argument that should have run several rounds ended in one. While a
+        challenge finding is still open, Project Owner's resolution goes back
+        for another round no matter which state it asked for. Only a Reviewer
+        verdict of no-material-concerns clears the way to sign-off.
+        """
+        if next_state not in {"needs-design-signoff", "ready-for-development"}:
+            return next_state
+        if not self._open_challenge_findings(comments):
+            return next_state
+        # The orchestrator is imposing this round, not Project Owner, so it
+        # supplies the round number the marker records.
+        result["requirements_challenge_round"] = (
+            self._latest_requirements_challenge_round(comments) + 1
+        )
+        # Keep the result's own view consistent: the renderer re-validates it,
+        # and a mismatched next_state/round pair would be rejected.
+        result["next_state"] = "needs-requirements-challenge"
+        result.pop("final_design", None)
+        return "needs-requirements-challenge"
 
     def _open_challenge_findings(
         self, comments: Iterable[dict[str, Any]]

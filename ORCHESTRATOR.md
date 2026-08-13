@@ -142,6 +142,23 @@ Because the review record lives on the pull request, recovery reads it from
 there: round counting, prior findings, open disputes, and the
 already-reviewed-this-commit check all query the pull request conversation.
 
+## Who decides the argument is over
+
+The proposer does not get to declare its own proposal converged. Project Owner
+may ask for `needs-design-signoff`, but while any blocking challenge finding is
+still open the orchestrator redirects that bid back to
+`needs-requirements-challenge` for another round, supplying the round number
+itself. Only a Reviewer verdict carrying no blocking findings clears the way.
+
+This matters because the incentives are asymmetric: the proposer always has a
+reason to call it done, and the reviewer is the one holding the objection. When
+Project Owner controlled the exit, arguments that warranted several rounds
+ended in one.
+
+The accept-or-dispute contract is enforced on the same path: Project Owner's
+resolution must take a position on every blocking finding, and a resolution
+that silently omits one is rejected and retried rather than published.
+
 ## Final Design sign-off
 
 Convergence on scope is not implicit. Once no blocking challenge finding is
