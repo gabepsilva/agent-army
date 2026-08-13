@@ -32,7 +32,8 @@ The following labels are the complete workflow state vocabulary:
 | `needs-grooming` | Project Owner should route and clarify the issue. | Dispatch Project Owner. |
 | `needs-decision` | Project Owner must review evidence or answer a specialist question. | Dispatch Project Owner. |
 | `needs-documentation` | Documentation analysis is required. | Dispatch Doku. |
-| `ready-for-development` | Product direction is approved for implementation. | Dispatch Developer. |
+| `needs-design-signoff` | The converged design awaits the Reviewer's stamp. | Dispatch Optimization Reviewer in `design_signoff` mode. |
+| `ready-for-development` | The design was stamped and is approved for implementation. | Dispatch Developer. |
 | `needs-requirements-challenge` | The Project Owner's scope draft needs bounded independent stress testing. | Dispatch Optimization Reviewer in `requirements_challenge` mode. |
 | `needs-optimization-review` | A Developer pull request needs an independent review. | Dispatch Optimization Reviewer. |
 | `ready-for-merge` | The exact pull-request head passed Optimization Review. | Leave untouched; merge remains a human/branch-protection concern. |
@@ -69,7 +70,8 @@ unlabeled ───────────────► Project Owner ──�
 needs-grooming ──────────► Project Owner ───────────────► selected next state
 needs-decision ──────────► Project Owner ───────────────► selected next state
 needs-documentation ───────► Doku ────────────────────────► needs-decision
-needs-requirements-challenge ► Optimization Reviewer ───► needs-decision
+needs-requirements-challenge ► Optimization Reviewer ───► needs-decision (loops to convergence)
+needs-design-signoff ───────► Optimization Reviewer ───► ready-for-development (on stamp)
 ready-for-development ─────► Developer ───────────────────► needs-optimization-review
 needs-optimization-review ─► Optimization Reviewer ──────► outcome-mapped state
 needs-user-guidance ────────► human replaces label ───────► actionable state
@@ -116,6 +118,44 @@ and validates its explicit outcome. The outcomes map deterministically:
 Every review is tied to the exact head SHA. A later commit has no matching
 review marker and therefore requires a fresh review. Optimization Reviewer is a
 separate role and does not modify the pull request.
+
+## Where each conversation happens
+
+The issue and the pull request hold different conversations, and neither
+duplicates the other:
+
+- **The issue** is where scope is argued and settled, and where the workflow
+  record lives. It carries the requirements-challenge rounds, the `## Final
+  Design:` write-up, and Project Owner's housekeeping.
+- **The pull request** is where the code is argued. Every review round, every
+  Developer response, and the durable markers the loop reads back all live
+  there, next to the diff they are about.
+
+During PR review the issue stays quiet. The Developer's original handoff
+comment links the two, and when the review settles, Project Owner posts one
+line on the issue recording why the label moved. The only review-side exception
+is an escalation, which is a handover to a human rather than review discussion.
+
+Because the review record lives on the pull request, recovery reads it from
+there: round counting, prior findings, open disputes, and the
+already-reviewed-this-commit check all query the pull request conversation.
+
+## Final Design sign-off
+
+Convergence on scope is not implicit. Once no blocking challenge finding is
+open, Project Owner routes to `needs-design-signoff` and the orchestrator posts
+the agreed scope as one `## Final Design:` comment.
+
+The Reviewer then answers one narrow question: does this faithfully record what
+was argued and conceded? Not whether the decision is right -- that argument is
+already over. It stamps the comment with a reaction when the write-up is
+faithful, or returns corrections naming what is misrecorded. A correction
+revises the same comment in place, so there is always exactly one Final Design
+to read, and only a stamped design reaches `ready-for-development`.
+
+This gate gets `MAX_SIGNOFF_ROUNDS` (3) rather than the full argument budget:
+it is checking a transcription of a settled argument, so failing three times is
+itself the signal, and it escalates to a human.
 
 ## Convergence between Developer and Reviewer
 

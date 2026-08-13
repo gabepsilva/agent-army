@@ -585,7 +585,12 @@ class IssueOrchestrator:
         )
         if existing:
             pull_request = existing[0]
-            if self._latest_review_outcome(work_item["issue"].get("comments", []), pull_request) == "changes-requested":
+            # The review outcome is recorded on the pull request now.
+            pull_conversation = GitHubTarget(
+                self.owner, self.repository, int(pull_request["number"]), "issue"
+            )
+            review_comments = task.agent.github.get_issue_comments(pull_conversation)
+            if self._latest_review_outcome(review_comments, pull_request) == "changes-requested":
                 return self._run_developer_on_existing_pr(
                     target, work_item, task, pull_request, branch
                 )
@@ -705,10 +710,13 @@ class IssueOrchestrator:
         pull_target = GitHubTarget(self.owner, self.repository, pull_number, "pull_request")
         implementation_work_item = WorkItemReader(task.agent.github).read(pull_target)
         implementation_work_item["source_issue"] = work_item
-        comments = work_item["issue"].get("comments", [])
-        # The findings the Developer is answering. It must fix or dispute each
+        # The findings the Developer is answering live on the pull request,
+        # where the review argument happens -- not on the originating issue.
+        # implementation_work_item was read from the PR target, so its
+        # comments are the PR conversation. It must fix or dispute each
         # blocking one; validate_developer_result rejects silent omission.
-        open_findings = self._open_review_findings(comments)
+        pull_comments = implementation_work_item["issue"].get("comments", [])
+        open_findings = self._open_review_findings(pull_comments)
         implementation_work_item["review_findings"] = open_findings
         head_sha = str(pull_request["head"]["sha"])
         try:
@@ -894,7 +902,10 @@ class IssueOrchestrator:
         pull_request = self._reviewer_github.get_pull_request(pull_target)
         head_sha = str(pull_request["head"]["sha"])
         comments = work_item["issue"].get("comments", [])
-        recovered = self._find_review_result(comments, task, head_sha)
+        # The review argument is recorded on the pull request, so that is
+        # where a prior round's durable marker lives.
+        pull_comments = self._reviewer_github.get_issue_comments(pull_conversation_target)
+        recovered = self._find_review_result(pull_comments, task, head_sha)
         if recovered is not None:
             try:
                 self._apply_transition(target, work_item, task, recovered["next"])
@@ -922,13 +933,16 @@ class IssueOrchestrator:
                     round_number=int(attributes.get("round") or 1),
                     findings=decode_payload(summary).get("findings") or [],
                 )
-                self._reviewer_github.create_issue_comment(target, issue_comment)
+                self._reviewer_github.create_issue_comment(
+                    pull_conversation_target, issue_comment
+                )
                 self._apply_transition(target, work_item, task, next_state)
+                self._close_out_review(target, next_state, pull_number, pull_request)
             except Exception as error:
                 return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
             return OrchestrationOutcome("recovered", target.number, task.agent.name)
 
-        round_number = self._review_round(comments, pull_number) + 1
+        round_number = self._review_round(pull_comments, pull_number) + 1
         if round_number > MAX_CONVERGENCE_ROUNDS:
             # The argument is not converging on its own. Stop spending agent
             # runs on it and put the contested findings in front of a human.
@@ -942,23 +956,25 @@ class IssueOrchestrator:
                     round_number=round_number - 1,
                     open_findings=[
                         finding
-                        for finding in self._open_review_findings(comments)
+                        for finding in self._open_review_findings(pull_comments)
                         if finding.get("severity") == BLOCKING
                     ],
                 )
+                # Escalation is the one thing that must reach the issue: it
+                # is a workflow handover to a human, not review discussion.
                 self._reviewer_github.create_issue_comment(target, escalation)
                 self._apply_transition(target, work_item, task, "needs-user-guidance")
             except Exception as error:
                 return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
             return OrchestrationOutcome("escalated", target.number, task.agent.name)
 
-        open_disputes = self._open_developer_disputes(comments)
+        open_disputes = self._open_developer_disputes(pull_comments)
         review_work_item = self._review_reader.read(pull_target)
         review_work_item["source_issue"] = work_item
         # The argument so far, structured: what the Developer disputed and
         # why, and this round's number. The Reviewer must answer each dispute.
         review_work_item["open_disputes"] = open_disputes
-        review_work_item["prior_findings"] = self._open_review_findings(comments)
+        review_work_item["prior_findings"] = self._open_review_findings(pull_comments)
         review_work_item["review_round"] = round_number
         try:
             with self._worktree_factory(
@@ -998,18 +1014,7 @@ class IssueOrchestrator:
                 pull_request_url=pull_request["html_url"],
                 branch=pull_request["head"]["ref"],
                 head_sha=head_sha,
-            )
-            issue_comment = render_optimization_review_marker_comment(
-                invocation_id=invocation_id,
-                source_state=task.source_state,
-                next_state=next_state,
-                outcome=result["outcome"],
-                pull_request_number=pull_number,
-                branch=pull_request["head"]["ref"],
-                head_sha=head_sha,
-                pull_request_url=pull_request["html_url"],
                 round_number=round_number,
-                findings=result.get("findings") or [],
             )
             conclusion = {
                 "approved": "success",
@@ -1033,15 +1038,14 @@ class IssueOrchestrator:
                 # another full agent run on the next poll just because this
                 # call failed (e.g. a transient permissions error).
                 check_run_error = str(error)
-            # The full review -- evidence, questions, recommended actions --
-            # is posted on the pull request, next to the diff and discussion
-            # it's about. The issue only gets the durable marker and a
-            # pointer: any issue-side agent that needs the full findings gets
-            # them directly via _attach_linked_pull_request instead of
-            # requiring them to be duplicated here.
+            # Review discussion lives entirely on the pull request, next to
+            # the diff it is about. The issue stays quiet during the review
+            # loop; Project Owner does the issue-side housekeeping once the
+            # PR is settled. The PR comment carries the durable marker, so
+            # recovery reads the PR conversation rather than the issue.
             self._reviewer_github.create_issue_comment(pull_conversation_target, full_comment)
-            self._reviewer_github.create_issue_comment(target, issue_comment)
             self._apply_transition(target, work_item, task, next_state)
+            self._close_out_review(target, next_state, pull_number, pull_request)
         except Exception as error:
             return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
         if check_run_error is not None:
@@ -1132,6 +1136,33 @@ class IssueOrchestrator:
             and attributes.get("role") == OPTIMIZATION_REVIEWER
             and attributes.get("pr") == str(pull_number)
         )
+
+    def _close_out_review(
+        self,
+        target: GitHubTarget,
+        next_state: str,
+        pull_number: int,
+        pull_request: dict[str, Any],
+    ) -> None:
+        """Record the settled review on the issue, in Project Owner's voice.
+
+        The argument itself stays on the pull request. This is issue-side
+        housekeeping -- the trace that says why the label moved -- and it is
+        best-effort: the label transition already happened and the pull
+        request holds the durable record, so failing to post must not undo it.
+        """
+        if next_state != "ready-for-merge":
+            return
+        try:
+            self._project_owner_github.create_issue_comment(
+                target,
+                "## Agent Army: ready to merge\n\n"
+                f"[Pull request #{pull_number}]({pull_request['html_url']}) passed "
+                "Optimization Review. The review discussion is on the pull request.\n\n"
+                f"Workflow transition: `needs-optimization-review` → `{next_state}`.",
+            )
+        except Exception:
+            return
 
     def _find_developer_marker(self, comments: Iterable[dict[str, Any]]) -> dict[str, str] | None:
         for attributes in reversed(list(_iter_markers(comments))):
@@ -1224,7 +1255,12 @@ class IssueOrchestrator:
         pull_request = self._reviewer_github.get_pull_request(pull_target)
         head_sha = str(pull_request["head"]["sha"])
         task = _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review")
-        if self._find_review_result(work_item["issue"].get("comments", []), task, head_sha):
+        # A prior review for this exact head is recorded on the pull request.
+        pull_conversation = GitHubTarget(
+            self.owner, self.repository, int(marker["pr"]), "issue"
+        )
+        pull_comments = self._reviewer_github.get_issue_comments(pull_conversation)
+        if self._find_review_result(pull_comments, task, head_sha):
             return False
         return self._find_review_check(head_sha) is None
 

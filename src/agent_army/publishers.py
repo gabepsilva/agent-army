@@ -535,17 +535,31 @@ def render_optimization_review_result(
     pull_request_url: str,
     branch: str,
     head_sha: str,
+    round_number: int = 1,
 ) -> str:
-    """Render the review outcome and exact commit under review."""
+    """Render one round of the review argument on the pull request.
+
+    This comment is the durable record for the review loop -- the issue stays
+    quiet -- so it carries the marker and the payload that the next round and
+    any recovery pass read back.
+    """
     validate_optimization_review_result(result, head_sha)
     outcome = result["outcome"]
+    findings = result.get("findings") or []
+    blocking = [finding for finding in findings if finding["severity"] == BLOCKING]
     lines = [
         f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
         f"from={source_state} next={next_state} outcome={outcome} "
-        f"pr={pull_request_number} branch={branch} head={head_sha} -->",
-        "## Agent Army: Optimization Reviewer completed",
+        f"pr={pull_request_number} branch={branch} head={head_sha} "
+        f"round={round_number} -->",
+        encode_payload({"findings": findings, "round": round_number}),
+        f"## Agent Army: Optimization Reviewer completed — round {round_number}",
         "",
         f"Outcome: **{outcome}**",
+        "",
+        f"Convergence: **{len(blocking)} blocking**, "
+        f"{len([f for f in findings if f['severity'] == 'should-fix'])} should-fix, "
+        f"{len([f for f in findings if f['severity'] == 'nit'])} nit",
         "",
         _prose(result["summary"]),
         "",

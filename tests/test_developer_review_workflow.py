@@ -125,7 +125,12 @@ class FakeWorkflowGitHub:
         }
 
     def get_issue_comments(self, target) -> list[dict]:
-        return self.pr_comments if target.kind == "pull_request" else self.comments
+        # GitHub serves PR-conversation comments from the issues endpoint, so
+        # the pull request's own number selects the thread -- not the target
+        # kind. create_issue_comment above already routes this way.
+        if target.number == self.pull_request["number"]:
+            return self.pr_comments
+        return self.comments
 
     def create_issue_comment(self, target, body: str) -> dict:
         entry = {"body": body, "user": {"login": "agent-army"}}
@@ -276,14 +281,15 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(github.labels, ["ready-for-merge"])
         self.assertEqual(len(github.checks), 1)
         self.assertIn("Outcome: **approved**", github.checks[0]["output"]["summary"])
-        # The full review (evidence, questions, recommended actions) is
-        # posted on the pull request, not duplicated onto the issue.
+        # Review discussion lives entirely on the pull request.
         self.assertEqual(len(github.pr_comments), 1)
         self.assertIn("Evidence", github.pr_comments[0]["body"])
-        # The issue only gets the durable marker: outcome, link, transition.
+        self.assertIn("round=1", github.pr_comments[0]["body"])
+        # The issue gets no review discussion -- only the Developer's original
+        # PR handoff and Project Owner's one-line housekeeping trace.
         self.assertEqual(len(github.comments), 2)
         self.assertNotIn("Evidence", github.comments[1]["body"])
-        self.assertIn("Full review: [pull request #9]", github.comments[1]["body"])
+        self.assertIn("ready to merge", github.comments[1]["body"])
         self.assertEqual(
             executor.requests[0].reference_paths,
             (
@@ -330,9 +336,10 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         self.make_orchestrator(github, executor, review_clean=True).run_once()
 
         self.assertEqual(github.labels, ["ready-for-development"])
-        marker = github.comments[-1]["body"]
+        # The argument -- and the payload the next round reads back -- is on
+        # the pull request now, not the issue.
+        marker = github.pr_comments[-1]["body"]
         self.assertIn("round=1", marker)
-        self.assertIn("1 blocking", marker)
         self.assertEqual(decode_payload(marker)["findings"][0]["id"], "F1")
 
     def test_unconverged_argument_escalates_to_a_human_after_round_seven(self) -> None:
@@ -353,9 +360,9 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
             }
             for index in range(1, MAX_CONVERGENCE_ROUNDS + 1)
         ]
-        github = FakeWorkflowGitHub(
-            ["needs-optimization-review"], [developer_marker, *prior_rounds]
-        )
+        github = FakeWorkflowGitHub(["needs-optimization-review"], [developer_marker])
+        # The rounds happened on the pull request, where the argument lives.
+        github.pr_comments.extend(prior_rounds)
         executor = FakeExecutor(review_result())
 
         outcome = self.make_orchestrator(github, executor, review_clean=True).run_once()
@@ -392,6 +399,49 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         self.assertEqual(outcome.status, "processed")
         self.assertEqual(github.labels, ["needs-decision"])
         self.assertIn("Which audience", github.comments[-1]["body"])
+
+    def test_developer_reads_findings_from_the_pull_request_not_the_issue(self) -> None:
+        # Review findings live on the PR now. If the Developer kept reading the
+        # issue, open_findings would silently be empty and the defend-or-concede
+        # contract would never fire -- a break no other test would notice.
+        developer_marker = {
+            "body": "<!-- agent-army:result role=developer from=ready-for-development "
+            "next=needs-optimization-review pr=9 branch=agent-army/issue-7-test-issue "
+            "head=developer-sha -->"
+        }
+        github = FakeWorkflowGitHub(["ready-for-development"], [developer_marker])
+        github.pull_request["head"]["ref"] = "agent-army/issue-7-test-issue"
+        # A prior review round, recorded on the pull request.
+        github.pr_comments.append(
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "from=needs-optimization-review next=ready-for-development "
+                "outcome=changes-requested pr=9 head=developer-sha round=1 -->\n"
+                + encode_payload(
+                    {"findings": blocking_review_result()["findings"], "round": 1}
+                )
+            }
+        )
+        # The Developer is revising an existing PR, not opening a new one.
+        github.list_open_pull_requests = lambda owner, repository, *, head=None: [
+            github.pull_request
+        ]
+        result = developer_result()
+        result["responses"] = [
+            {
+                "finding_id": "F1",
+                "disposition": "accepted",
+                "rationale": "Moved the guard ahead of the agent run.",
+            }
+        ]
+        executor = FakeExecutor(result)
+
+        outcome = self.make_orchestrator(github, executor).run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertEqual(
+            executor.requests[0].work_item["review_findings"][0]["id"], "F1"
+        )
 
     def test_reviewer_check_run_failure_does_not_block_transition_or_rerun_executor(self) -> None:
         # A permissions error creating the check run (seen in production as a
