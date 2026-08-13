@@ -769,19 +769,32 @@ class IssueOrchestrator:
                 "changes-requested": "failure",
                 "unable-to-assess": "neutral",
             }[result["outcome"]]
-            self._reviewer_github.create_check_run(
-                self.owner,
-                self.repository,
-                name=OPTIMIZATION_REVIEW_CHECK_NAME,
-                head_sha=head_sha,
-                conclusion=conclusion,
-                summary=comment,
-                details_url=pull_request["html_url"],
-            )
+            check_run_error: str | None = None
+            try:
+                self._reviewer_github.create_check_run(
+                    self.owner,
+                    self.repository,
+                    name=OPTIMIZATION_REVIEW_CHECK_NAME,
+                    head_sha=head_sha,
+                    conclusion=conclusion,
+                    summary=comment,
+                    details_url=pull_request["html_url"],
+                )
+            except Exception as error:
+                # The check run is a supplementary status; the issue comment
+                # marker below is what recovery keys off of. Don't burn
+                # another full agent run on the next poll just because this
+                # call failed (e.g. a transient permissions error).
+                check_run_error = str(error)
             self._reviewer_github.create_issue_comment(target, comment)
             self._apply_transition(target, work_item, task, next_state)
         except Exception as error:
             return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
+        if check_run_error is not None:
+            return OrchestrationOutcome(
+                "processed", target.number, task.agent.name,
+                f"Optimization Review check run could not be created: {check_run_error}",
+            )
         return OrchestrationOutcome("processed", target.number, task.agent.name)
 
     def _find_developer_marker(self, comments: Iterable[dict[str, Any]]) -> dict[str, str] | None:

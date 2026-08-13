@@ -52,6 +52,7 @@ class FakeWorkflowGitHub:
         self.pr_comments: list[dict] = []
         self.checks: list[dict] = []
         self.label_updates: list[list[str]] = []
+        self.check_run_error: Exception | None = None
         self.pull_request = {
             "number": 9,
             "html_url": "https://github.com/acme/widgets/pull/9",
@@ -117,6 +118,8 @@ class FakeWorkflowGitHub:
         return [check for check in self.checks if check["head_sha"] == head_sha]
 
     def create_check_run(self, owner: str, repository: str, **kwargs) -> dict:
+        if self.check_run_error is not None:
+            raise self.check_run_error
         check = {"name": kwargs["name"], "head_sha": kwargs["head_sha"], "output": {"summary": kwargs["summary"]}}
         self.checks.append(check)
         return check
@@ -239,6 +242,29 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_reviewer_check_run_failure_does_not_block_transition_or_rerun_executor(self) -> None:
+        # A permissions error creating the check run (seen in production as a
+        # 403 on /check-runs) used to fail the whole task, so every poll
+        # re-ran the review agent from scratch until GitHub cooperated. The
+        # check run is supplementary status; the issue comment marker is
+        # what recovery keys off of, so this failure should not repeat work.
+        developer_marker = {
+            "body": "<!-- agent-army:result role=developer from=ready-for-development "
+            "next=needs-optimization-review pr=9 branch=agent-army/issue-7-test-issue head=developer-sha -->"
+        }
+        github = FakeWorkflowGitHub(["needs-optimization-review"], [developer_marker])
+        github.check_run_error = RuntimeError("HTTP Error 403: Forbidden")
+        executor = FakeExecutor(review_result())
+
+        outcome = self.make_orchestrator(github, executor, review_clean=True).run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertIn("403", outcome.detail or "")
+        self.assertEqual(github.labels, ["ready-for-merge"])
+        self.assertEqual(len(github.checks), 0)
+        self.assertEqual(len(github.comments), 2)
+        self.assertEqual(len(executor.requests), 1)
 
     def test_new_commit_on_merge_paused_pr_requires_fresh_review(self) -> None:
         comments = [
