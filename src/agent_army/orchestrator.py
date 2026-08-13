@@ -76,6 +76,33 @@ class _Task:
     invocation_mode: str | None = None
 
 
+@dataclass(frozen=True)
+class DryRunIneligibleIssue:
+    """One open issue that the next polling pass would skip, and why."""
+
+    issue_number: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class DryRunEligibleIssue:
+    """The single issue the next polling pass would act on."""
+
+    issue_number: int
+    role: str
+    source_state: str
+    action: str
+
+
+@dataclass(frozen=True)
+class DryRunReport:
+    """A preview of what the next polling pass would do, with no side effects."""
+
+    eligible_issue: DryRunEligibleIssue | None
+    ineligible_issues: tuple[DryRunIneligibleIssue, ...] = ()
+    has_open_issues: bool = True
+
+
 MARKER_PATTERN = re.compile(r"<!-- agent-army:(?P<kind>\w+) (?P<attributes>[^>]+?) -->")
 ATTRIBUTE_PATTERN = re.compile(r"(?P<key>[a-z_]+)=(?P<value>[^\s]+)")
 
@@ -168,6 +195,31 @@ class IssueOrchestrator:
             return self._run_task(target, work_item, task)
         return OrchestrationOutcome("idle")
 
+    def run_dry_run(self) -> DryRunReport:
+        """Preview the next polling pass without invoking an agent or writing to GitHub."""
+        issues = self._project_owner_github.list_open_issues(self.owner, self.repository)
+        sorted_issues = sorted(issues, key=lambda item: int(item["number"]))
+        if not sorted_issues:
+            return DryRunReport(eligible_issue=None, has_open_issues=False)
+        ineligible: list[DryRunIneligibleIssue] = []
+        for issue in sorted_issues:
+            target = GitHubTarget(self.owner, self.repository, int(issue["number"]), "issue")
+            work_item = self._reader.read(target)
+            task, reason = self._select_task_with_reason(work_item)
+            if task is None:
+                ineligible.append(
+                    DryRunIneligibleIssue(int(issue["number"]), reason or "unhandled-state")
+                )
+                continue
+            action = self._dry_run_action(target, work_item, task)
+            return DryRunReport(
+                eligible_issue=DryRunEligibleIssue(
+                    int(issue["number"]), task.agent.name, task.source_state, action
+                ),
+                ineligible_issues=tuple(ineligible),
+            )
+        return DryRunReport(eligible_issue=None, ineligible_issues=tuple(ineligible))
+
     def run_forever(
         self,
         poll_interval: float,
@@ -187,39 +239,47 @@ class IssueOrchestrator:
             sleeper(poll_interval)
 
     def _select_task(self, work_item: dict[str, Any]) -> _Task | None:
+        task, _ = self._select_task_with_reason(work_item)
+        return task
+
+    def _select_task_with_reason(
+        self, work_item: dict[str, Any]
+    ) -> tuple[_Task | None, str | None]:
+        """Return the eligible task, or None with a short ineligibility reason code."""
         issue = work_item["issue"]
         labels = [str(label) for label in issue.get("labels", [])]
         if ORCHESTRATION_PAUSED_LABEL in labels:
             # This human-controlled guard wins over intake and every workflow state.
-            return None
+            return None, "orchestration-paused"
         workflow_labels = [label for label in labels if label in WORKFLOW_STATES]
         comments = issue.get("comments", [])
 
         if len(workflow_labels) > 1:
             # Ambiguous state is left untouched until a human restores the invariant.
-            return None
+            return None, "ambiguous-labels"
         if not workflow_labels:
             if self._has_completed_intake(comments):
-                return None
-            return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED)
+                return None, "intake-already-completed"
+            return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED), None
 
         current_state = workflow_labels[0]
         if current_state == "needs-user-guidance":
-            return None
+            return None, "needs-user-guidance"
         if current_state == "ready-for-merge":
-            if OPTIMIZATION_REVIEWER in self._agents and self._needs_fresh_review(work_item):
-                return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review")
-            return None
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "no-agent-configured"
+            if self._needs_fresh_review(work_item):
+                return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review"), None
+            return None, "no-fresh-review-needed"
         if current_state == "needs-grooming":
-            return _Task(self._agents[PROJECT_OWNER], current_state)
+            return _Task(self._agents[PROJECT_OWNER], current_state), None
         if current_state == "needs-decision":
-            return _Task(self._agents[PROJECT_OWNER], current_state)
+            return _Task(self._agents[PROJECT_OWNER], current_state), None
         if current_state == "needs-documentation":
-            return _Task(self._agents[DOCUMENTATION], current_state)
-        if (
-            current_state == "needs-requirements-challenge"
-            and OPTIMIZATION_REVIEWER in self._agents
-        ):
+            return _Task(self._agents[DOCUMENTATION], current_state), None
+        if current_state == "needs-requirements-challenge":
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "no-agent-configured"
             pending_round = self._latest_project_owner_challenge_round(comments)
             challenge_task = _Task(
                 self._agents[OPTIMIZATION_REVIEWER],
@@ -227,16 +287,58 @@ class IssueOrchestrator:
                 "requirements_challenge",
             )
             if self._find_requirements_challenge_result(comments, pending_round) is not None:
-                return challenge_task
+                return challenge_task, None
             if self._latest_requirements_challenge_round(comments) >= 2:
                 # A second challenge may only be recovered, never started again.
-                return None
-            return challenge_task
-        if current_state == "ready-for-development" and DEVELOPER in self._agents:
-            return _Task(self._agents[DEVELOPER], current_state)
-        if current_state == "needs-optimization-review" and OPTIMIZATION_REVIEWER in self._agents:
-            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state)
-        return None
+                return None, "challenge-round-exhausted"
+            return challenge_task, None
+        if current_state == "ready-for-development":
+            if DEVELOPER not in self._agents:
+                return None, "no-agent-configured"
+            return _Task(self._agents[DEVELOPER], current_state), None
+        if current_state == "needs-optimization-review":
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "no-agent-configured"
+            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state), None
+        return None, "unhandled-state"
+
+    def _dry_run_action(
+        self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
+    ) -> str:
+        """Determine whether the task would invoke an agent or recover a durable result."""
+        comments = work_item["issue"].get("comments", [])
+        if task.agent.name == DEVELOPER:
+            if self._find_blocked_developer_result(comments, task.source_state) is not None:
+                return "recover result"
+            title = str(work_item["issue"].get("title") or f"Issue #{target.number}")
+            branch = branch_name(target.number, title)
+            existing = task.agent.github.list_open_pull_requests(
+                self.owner, self.repository, head=branch
+            )
+            if existing:
+                if self._latest_review_outcome(comments, existing[0]) == "changes-requested":
+                    return "invoke agent"
+                return "recover result"
+            return "invoke agent"
+        if task.agent.name == OPTIMIZATION_REVIEWER:
+            if task.invocation_mode == "requirements_challenge":
+                pending_round = self._latest_project_owner_challenge_round(comments)
+                recovered = self._find_requirements_challenge_result(comments, pending_round)
+                return "recover result" if recovered is not None else "invoke agent"
+            developer_marker = self._find_developer_marker(comments)
+            if developer_marker is None:
+                return "invoke agent"
+            pull_target = GitHubTarget(
+                self.owner, self.repository, int(developer_marker["pr"]), "pull_request"
+            )
+            pull_request = self._reviewer_github.get_pull_request(pull_target)
+            head_sha = str(pull_request["head"]["sha"])
+            if self._find_review_result(comments, task, head_sha) is not None:
+                return "recover result"
+            if self._find_review_check(head_sha) is not None:
+                return "recover result"
+            return "invoke agent"
+        return "recover result" if self._find_result(comments, task) is not None else "invoke agent"
 
     def _run_task(
         self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
@@ -873,3 +975,21 @@ def _format_outcome(outcome: OrchestrationOutcome) -> str:
     role = f" ({outcome.role})" if outcome.role else ""
     detail = f": {outcome.detail}" if outcome.detail else ""
     return f"Agent Army poll complete: {outcome.status}{issue}{role}{detail}"
+
+
+def format_dry_run_report(report: DryRunReport) -> str:
+    """Render a DryRunReport as the operator-facing dry-run summary."""
+    if report.eligible_issue is not None:
+        issue = report.eligible_issue
+        return (
+            f"Agent Army dry run: issue #{issue.issue_number} is eligible "
+            f"for {issue.role} (from {issue.source_state}); action: {issue.action}."
+        )
+    if not report.has_open_issues:
+        return "Agent Army dry run: no open issues."
+    if not report.ineligible_issues:
+        return "Agent Army dry run: no eligible issue."
+    lines = ["Agent Army dry run: no eligible issue."]
+    for status in report.ineligible_issues:
+        lines.append(f"  issue #{status.issue_number}: {status.reason}")
+    return "\n".join(lines)

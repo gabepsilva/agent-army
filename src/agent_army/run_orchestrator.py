@@ -10,7 +10,7 @@ from pathlib import Path
 from agent_army.config import load_github_app_config
 from agent_army.credentials import SessionCredentialBroker
 from agent_army.github_app import GitHubAppClient
-from agent_army.orchestrator import IssueOrchestrator
+from agent_army.orchestrator import IssueOrchestrator, format_dry_run_report
 
 
 def run(
@@ -27,6 +27,7 @@ def run(
     requirements_challenge_output_schema_path: Path,
     poll_interval: float = 60.0,
     once: bool = False,
+    dry_run: bool = False,
 ) -> str:
     """Start the configured polling service and return a one-shot status."""
     owner_config = load_github_app_config(project_owner_directory / "agent-config.yaml")
@@ -50,6 +51,9 @@ def run(
             reviewer_output_schema_path=reviewer_output_schema_path,
             requirements_challenge_output_schema_path=requirements_challenge_output_schema_path,
         )
+        if dry_run:
+            print(format_dry_run_report(orchestrator.run_dry_run()))
+            return "dry-run"
         if once:
             return orchestrator.run_once().status
         orchestrator.run_forever(poll_interval)
@@ -119,7 +123,19 @@ def main() -> None:
         action="store_true",
         help="Process at most one eligible issue and exit.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Preview which issue and agent the next polling pass would select, "
+            "without invoking an agent or writing to GitHub. Requires --once."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.dry_run and not args.once:
+        print("Agent Army orchestrator failed: --dry-run requires --once.", file=sys.stderr)
+        raise SystemExit(1)
 
     try:
         status = run(
@@ -135,11 +151,12 @@ def main() -> None:
             requirements_challenge_output_schema_path=args.requirements_challenge_output_schema,
             poll_interval=args.poll_interval,
             once=args.once,
+            dry_run=args.dry_run,
         )
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Agent Army orchestrator failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    if args.once:
+    if args.once and not args.dry_run:
         print(f"Agent Army one-shot poll: {status}")
 
 
