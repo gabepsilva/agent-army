@@ -15,7 +15,47 @@ uv run run-orchestrator \
   --workspace /path/to/target-repository
 ```
 
-Use `--once` for a single poll while developing or testing. The workspace is
+Use `--once` for a single poll while developing or testing. Combine it with
+`--dry-run` to preview what that poll would select without running an agent
+or writing to GitHub:
+
+```bash
+uv run run-orchestrator \
+  --repository OWNER/REPOSITORY \
+  --workspace /path/to/target-repository \
+  --once --dry-run
+```
+
+`--dry-run` requires `--once` and is rejected as a usage error, before any
+GitHub call, otherwise. It reuses the exact eligibility logic `--once` uses to
+select a task, so its answer can never diverge from what a live poll would
+actually do, and it never creates a comment, changes a label, invokes an
+agent, or creates a branch or pull request. It prints exactly one line and
+always exits 0 (finding nothing eligible is a successful preview, not a
+failure); non-zero remains reserved for actual failures such as a GitHub API
+error. Its output is one of:
+
+- `Agent Army dry-run: would dispatch issue #N to <agent> (from <state>).` --
+  the next poll would invoke `<agent>` on issue `#N`.
+- `Agent Army dry-run: would recover issue #N to <state> (no agent
+  invocation).` -- the next poll would only retry a previously failed label
+  update from a durable result comment, without invoking an agent. This
+  recovery detection is intentionally narrow: it covers only the simple
+  durable-result recovery already used for Project Owner, Doku, and
+  requirements-challenge tasks. It does not predict Developer's four
+  pull-request/git recovery paths -- every `ready-for-development` issue is
+  always reported as a plain dispatch.
+- `Agent Army dry-run: no eligible issue found (<reason>).` -- no open issue
+  is eligible. `<reason>` is a single aggregate category across all open
+  issues, chosen by this fixed precedence when issues are ineligible for
+  different reasons (first match wins): `all-paused` >
+  `all-ambiguous-labels` > `all-human-gated` > `no-action-needed` >
+  `no-open-issues` (only when the issue list is literally empty).
+  `all-human-gated` is limited to `needs-user-guidance` and
+  challenge-round-limit-reached issues; a stale `ready-for-merge` issue with
+  no fresh review needed falls under `no-action-needed`.
+
+The workspace is
 passed to Codex with workspace-write permissions, but GitHub credentials remain
 inside the Python process and are removed from the Codex subprocess environment.
 The orchestrator explicitly embeds the selected role references in the relevant

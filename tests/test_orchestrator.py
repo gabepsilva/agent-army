@@ -76,6 +76,45 @@ class FakeGitHub:
         self.label_updates.append(labels)
         return {}
 
+    def list_open_pull_requests(self, owner: str, repository: str, head: str) -> list[dict]:
+        raise AssertionError("dry-run must not call list_open_pull_requests for a Developer task.")
+
+
+class MultiIssueGitHub:
+    """A read-only fake supporting several open issues, for dry-run tests."""
+
+    def __init__(self, issues: dict[int, tuple[list[str], list[dict]]]) -> None:
+        self._issues = issues
+
+    def list_open_issues(self, owner: str, repository: str) -> list[dict]:
+        return [{"number": number} for number in self._issues]
+
+    def get_issue(self, target) -> dict:
+        labels, _comments = self._issues[target.number]
+        return {
+            "title": f"Issue #{target.number}",
+            "body": "Issue body",
+            "state": "open",
+            "html_url": f"https://github.com/acme/widgets/issues/{target.number}",
+            "labels": [{"name": label} for label in labels],
+        }
+
+    def get_issue_comments(self, target) -> list[dict]:
+        _labels, comments = self._issues[target.number]
+        return comments
+
+    def create_issue_comment(self, target, body: str) -> dict:
+        raise AssertionError("dry-run must not create issue comments.")
+
+    def update_issue_labels(self, target, labels: list[str]) -> dict:
+        raise AssertionError("dry-run must not update issue labels.")
+
+    def list_open_pull_requests(self, owner: str, repository: str, head: str) -> list[dict]:
+        raise AssertionError("dry-run must not call list_open_pull_requests.")
+
+    def get_check_runs(self, owner: str, repository: str, head_sha: str) -> list[dict]:
+        raise AssertionError("dry-run must not call get_check_runs.")
+
 
 class FakeExecutor:
     def __init__(self, *results: dict) -> None:
@@ -360,6 +399,84 @@ class IssueOrchestratorTests(unittest.TestCase):
         self.assertEqual(github.labels, ["needs-decision"])
         self.assertEqual(len(github.comments), 1)
         self.assertEqual(executor.calls, 1)
+
+    def test_dry_run_reports_developer_dispatch_without_pr_or_git_calls(self) -> None:
+        github = FakeGitHub(["ready-for-development"])
+        executor = FakeExecutor()
+        orchestrator = IssueOrchestrator(
+            repository="acme/widgets",
+            project_owner_github=github,
+            documentation_github=github,
+            developer_github=github,
+            reviewer_github=github,
+            workspace=Path("/workspace"),
+            project_owner_role=Path("agents/project-owner/ROLE.md"),
+            documentation_role=Path("agents/documentation/ROLE.md"),
+            developer_role=Path("agents/developer/ROLE.md"),
+            reviewer_role=Path("agents/optimization-reviewer/ROLE.md"),
+            output_schema_path=Path("schemas/orchestrator-result.schema.json"),
+            developer_output_schema_path=Path("schemas/developer-result.schema.json"),
+            reviewer_output_schema_path=Path("schemas/optimization-review-result.schema.json"),
+            executor=executor,
+            work_item_reader=WorkItemReader(github),
+        )
+
+        message = orchestrator.dry_run()
+
+        self.assertEqual(
+            message,
+            "Agent Army dry-run: would dispatch issue #7 to developer (from ready-for-development).",
+        )
+        self.assertEqual(executor.calls, 0)
+        self.assertEqual(github.label_updates, [])
+        self.assertEqual(github.comments, [])
+
+    def test_dry_run_reports_recovery_for_durable_result_without_rerunning_agent(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=documentation from=needs-documentation "
+                "next=needs-decision -->"
+            }
+        ]
+        github = FakeGitHub(["needs-documentation"], comments)
+        executor = FakeExecutor()
+        orchestrator = self.make_orchestrator(github, executor)
+
+        message = orchestrator.dry_run()
+
+        self.assertEqual(
+            message,
+            "Agent Army dry-run: would recover issue #7 to needs-decision (no agent invocation).",
+        )
+        self.assertEqual(executor.calls, 0)
+        self.assertEqual(github.label_updates, [])
+
+    def test_dry_run_precedence_prefers_paused_over_no_action_needed(self) -> None:
+        completed_intake_comments = [
+            {
+                "body": "<!-- agent-army:result role=project-owner from=unlabeled "
+                "next=needs-grooming -->"
+            }
+        ]
+        github = MultiIssueGitHub(
+            {
+                1: ([], completed_intake_comments),
+                2: (["orchestration-paused"], []),
+            }
+        )
+        orchestrator = self.make_orchestrator(github, FakeExecutor())
+
+        message = orchestrator.dry_run()
+
+        self.assertEqual(message, "Agent Army dry-run: no eligible issue found (all-paused).")
+
+    def test_dry_run_reports_no_open_issues(self) -> None:
+        github = MultiIssueGitHub({})
+        orchestrator = self.make_orchestrator(github, FakeExecutor())
+
+        message = orchestrator.dry_run()
+
+        self.assertEqual(message, "Agent Army dry-run: no eligible issue found (no-open-issues).")
 
 
 if __name__ == "__main__":

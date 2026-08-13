@@ -42,6 +42,7 @@ def run(
     requirements_challenge_output_schema_path: Path,
     poll_interval: float = 60.0,
     once: bool = False,
+    dry_run: bool = False,
     runtime_config: RuntimeConfig | None = None,
 ) -> str:
     """Start the configured polling service and return a one-shot status."""
@@ -80,6 +81,8 @@ def run(
             },
         )
         if once:
+            if dry_run:
+                return orchestrator.dry_run()
             status = orchestrator.run_once().status
             return f"{status} (reported cost ${orchestrator.total_cost_usd:.4f})"
         orchestrator.run_forever(poll_interval)
@@ -161,7 +164,18 @@ def main() -> None:
         action="store_true",
         help="Process at most one eligible issue and exit.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "With --once, report which issue and agent the next poll would select "
+            "(or why none is eligible) without invoking an agent or writing to GitHub."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.dry_run and not args.once:
+        parser.error("--dry-run requires --once.")
 
     try:
         status = run(
@@ -177,12 +191,15 @@ def main() -> None:
             requirements_challenge_output_schema_path=args.requirements_challenge_output_schema,
             poll_interval=args.poll_interval,
             once=args.once,
+            dry_run=args.dry_run,
             runtime_config=load_runtime_config(args.config).with_backend(args.backend),
         )
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Agent Army orchestrator failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    if args.once:
+    if args.dry_run:
+        print(status)
+    elif args.once:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
         print(f"[{timestamp}] Agent Army one-shot poll: {status}")
 

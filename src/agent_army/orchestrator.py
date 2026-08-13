@@ -191,6 +191,75 @@ class IssueOrchestrator:
             return self._run_task(target, work_item, task)
         return OrchestrationOutcome("idle")
 
+    def dry_run(self) -> str:
+        """Report what run_once would select next without writing anything.
+
+        Reuses _select_task_with_reason -- the exact eligibility logic run_once
+        uses -- so a preview can never diverge from what a live pass would pick.
+        Only read-only GitHub calls already used for selection happen here; no
+        comments, labels, executor invocation, branch, or pull request is
+        created.
+        """
+        issues = self._project_owner_github.list_open_issues(self.owner, self.repository)
+        if not issues:
+            return "Agent Army dry-run: no eligible issue found (no-open-issues)."
+        reasons: list[str] = []
+        for issue in sorted(issues, key=lambda item: int(item["number"])):
+            target = GitHubTarget(self.owner, self.repository, int(issue["number"]), "issue")
+            work_item = self._reader.read(target)
+            task, reason = self._select_task_with_reason(work_item)
+            if task is not None:
+                return self._describe_dry_run_task(target.number, work_item, task)
+            reasons.append(reason or "no-action-needed")
+        category = self._aggregate_dry_run_reason(reasons)
+        return f"Agent Army dry-run: no eligible issue found ({category})."
+
+    def _describe_dry_run_task(
+        self, issue_number: int, work_item: dict[str, Any], task: _Task
+    ) -> str:
+        """Describe the task run_once would perform next.
+
+        Recovery detection is intentionally narrow: only the simple
+        _find_result-style recovery already used by _run_issue_task and
+        _run_requirements_challenge_task. Developer recovery (existing pull
+        requests, review outcomes, git/worktree state) is out of scope for
+        dry-run, so every ready-for-development issue is reported as a plain
+        dispatch.
+        """
+        comments = work_item["issue"].get("comments", [])
+        recovered: dict[str, str] | None = None
+        if task.agent.name in (PROJECT_OWNER, DOCUMENTATION):
+            recovered = self._find_result(comments, task)
+        elif task.agent.name == OPTIMIZATION_REVIEWER and task.invocation_mode == "requirements_challenge":
+            pending_round = self._latest_project_owner_challenge_round(comments)
+            recovered = self._find_requirements_challenge_result(comments, pending_round)
+        if recovered is not None:
+            return (
+                f"Agent Army dry-run: would recover issue #{issue_number} to "
+                f"{recovered['next']} (no agent invocation)."
+            )
+        return (
+            f"Agent Army dry-run: would dispatch issue #{issue_number} to "
+            f"{task.agent.name} (from {task.source_state})."
+        )
+
+    @staticmethod
+    def _aggregate_dry_run_reason(reasons: list[str]) -> str:
+        """The single reported reason across issues ineligible for different
+        causes, using the same severity order _select_task already checks.
+        """
+        reason_set = set(reasons)
+        precedence = [
+            ("paused", "all-paused"),
+            ("ambiguous-labels", "all-ambiguous-labels"),
+            ("human-gated", "all-human-gated"),
+            ("no-action-needed", "no-action-needed"),
+        ]
+        for key, category in precedence:
+            if key in reason_set:
+                return category
+        return "no-action-needed"
+
     def run_forever(
         self,
         poll_interval: float,
@@ -210,35 +279,46 @@ class IssueOrchestrator:
             sleeper(poll_interval)
 
     def _select_task(self, work_item: dict[str, Any]) -> _Task | None:
+        task, _reason = self._select_task_with_reason(work_item)
+        return task
+
+    def _select_task_with_reason(
+        self, work_item: dict[str, Any]
+    ) -> tuple[_Task | None, str | None]:
+        """The single source of truth for eligibility, for both run_once and
+        dry_run. Returns the task to run, or None with a reason category
+        (paused, ambiguous-labels, human-gated, no-action-needed) a caller can
+        use to explain why nothing was selected.
+        """
         issue = work_item["issue"]
         labels = [str(label) for label in issue.get("labels", [])]
         if ORCHESTRATION_PAUSED_LABEL in labels:
             # This human-controlled guard wins over intake and every workflow state.
-            return None
+            return None, "paused"
         workflow_labels = [label for label in labels if label in WORKFLOW_STATES]
         comments = issue.get("comments", [])
 
         if len(workflow_labels) > 1:
             # Ambiguous state is left untouched until a human restores the invariant.
-            return None
+            return None, "ambiguous-labels"
         if not workflow_labels:
             if self._has_completed_intake(comments):
-                return None
-            return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED)
+                return None, "no-action-needed"
+            return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED), None
 
         current_state = workflow_labels[0]
         if current_state == "needs-user-guidance":
-            return None
+            return None, "human-gated"
         if current_state == "ready-for-merge":
             if OPTIMIZATION_REVIEWER in self._agents and self._needs_fresh_review(work_item):
-                return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review")
-            return None
+                return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review"), None
+            return None, "no-action-needed"
         if current_state == "needs-grooming":
-            return _Task(self._agents[PROJECT_OWNER], current_state)
+            return _Task(self._agents[PROJECT_OWNER], current_state), None
         if current_state == "needs-decision":
-            return _Task(self._agents[PROJECT_OWNER], current_state)
+            return _Task(self._agents[PROJECT_OWNER], current_state), None
         if current_state == "needs-documentation":
-            return _Task(self._agents[DOCUMENTATION], current_state)
+            return _Task(self._agents[DOCUMENTATION], current_state), None
         if (
             current_state == "needs-requirements-challenge"
             and OPTIMIZATION_REVIEWER in self._agents
@@ -250,16 +330,16 @@ class IssueOrchestrator:
                 "requirements_challenge",
             )
             if self._find_requirements_challenge_result(comments, pending_round) is not None:
-                return challenge_task
+                return challenge_task, None
             if self._latest_requirements_challenge_round(comments) >= 2:
                 # A second challenge may only be recovered, never started again.
-                return None
-            return challenge_task
+                return None, "human-gated"
+            return challenge_task, None
         if current_state == "ready-for-development" and DEVELOPER in self._agents:
-            return _Task(self._agents[DEVELOPER], current_state)
+            return _Task(self._agents[DEVELOPER], current_state), None
         if current_state == "needs-optimization-review" and OPTIMIZATION_REVIEWER in self._agents:
-            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state)
-        return None
+            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state), None
+        return None, "no-action-needed"
 
     def _run_task(
         self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
