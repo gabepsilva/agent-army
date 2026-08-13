@@ -3,7 +3,7 @@ from pathlib import Path
 
 from agent_army.agent_executor import AgentExecutionResult
 from agent_army.orchestrator import IssueOrchestrator
-from agent_army.publishers import encode_payload
+from agent_army.publishers import MAX_CONVERGENCE_ROUNDS, encode_payload
 from agent_army.work_items import WorkItemReader
 
 
@@ -292,6 +292,62 @@ class IssueOrchestratorTests(unittest.TestCase):
 
         self.assertEqual(orchestrator.run_once().status, "processed")
         self.assertEqual(github.labels, ["needs-design-signoff"])
+
+    def test_a_long_argument_stays_selectable_past_the_old_two_round_cap(self) -> None:
+        # The selector used to refuse to dispatch after round 2, so an
+        # argument that legitimately needed more rounds became unreachable:
+        # "no eligible issue" forever, with no comment and no label change to
+        # explain it. The round bound belongs to the task runner, which
+        # escalates to a human.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                f"next=needs-decision round={index} outcome=concerns-found -->"
+            }
+            for index in (1, 2)
+        ]
+        comments.append(
+            {
+                "body": "<!-- agent-army:result role=project-owner from=needs-decision "
+                "next=needs-requirements-challenge challenge_round=3 -->"
+            }
+        )
+        github = FakeGitHub(["needs-requirements-challenge"], comments)
+        orchestrator = self.make_reviewer_orchestrator(github, FakeExecutor())
+
+        task = orchestrator._select_task(
+            {"issue": {"labels": ["needs-requirements-challenge"], "comments": comments}}
+        )
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.invocation_mode, "requirements_challenge")
+
+    def test_an_unconverged_argument_escalates_rather_than_stalling(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                f"next=needs-decision round={index} outcome=concerns-found -->"
+            }
+            for index in range(1, MAX_CONVERGENCE_ROUNDS + 1)
+        ]
+        # Project Owner asked for one more round than the bound allows.
+        comments.append(
+            {
+                "body": "<!-- agent-army:result role=project-owner from=needs-decision "
+                f"next=needs-requirements-challenge challenge_round={MAX_CONVERGENCE_ROUNDS + 1} -->"
+            }
+        )
+        github = FakeGitHub(["needs-requirements-challenge"], comments)
+        executor = FakeExecutor()
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(github.labels, ["needs-user-guidance"])
+        self.assertEqual(executor.calls, 0)
 
     def test_second_challenge_state_with_durable_result_only_recovers_label(self) -> None:
         comments = [

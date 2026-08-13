@@ -257,11 +257,11 @@ class IssueOrchestrator:
                 current_state,
                 "requirements_challenge",
             )
-            if self._find_requirements_challenge_result(comments, pending_round) is not None:
-                return challenge_task
-            if self._latest_requirements_challenge_round(comments) >= 2:
-                # A second challenge may only be recovered, never started again.
-                return None
+            # The round bound lives in _run_requirements_challenge_task, which
+            # escalates to a human past MAX_CONVERGENCE_ROUNDS. A second cap
+            # here silently made the issue unselectable instead -- the argument
+            # stalled at round 2 with no comment, no label change, and no way
+            # to make progress.
             return challenge_task
         if current_state == "needs-design-signoff" and OPTIMIZATION_REVIEWER in self._agents:
             return _Task(
