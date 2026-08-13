@@ -23,6 +23,28 @@ role prompt, so the role can use them even when the target workspace does not
 contain Agent Army's reference files. Requirements challenges receive Domain
 Modeling and Grilling; ordinary PR reviews receive only Domain Modeling.
 
+Add `--dry-run` alongside `--once` to preview the next poll instead of running
+it: `--dry-run` requires `--once` and exits non-zero without contacting GitHub
+if `--once` is missing. In dry-run mode the orchestrator performs the same
+read-only eligibility scan `--once` would, but stops before any write: no
+comment, no label update, no Codex invocation, and no git/worktree operation.
+It reports one of:
+
+- the lowest-numbered eligible issue, its current workflow label, and either
+  "would invoke `<agent>`" (the next pass will run the agent) or "would
+  recover (relabel only, no agent invoked) -> `<next-state>`" (a matching
+  result is already posted, so the next pass would only relabel); or
+- "no eligible issue", with a one-line reason for each issue skipped along
+  the way (paused, ambiguous labels, blocked on human, and so on); or
+- "no open issues" if the repository has none.
+
+Only the single selected issue is reported; dry-run does not enumerate the
+whole backlog's eventual fate. Its read cost is not bounded to `--once`'s
+minimum: scanning a `ready-for-merge` candidate, and checking whether the
+selected issue's state would recover, both make the same live GitHub read
+calls `--once` already makes today (for example `get_pull_request`,
+`get_issue_comments`, `get_check_runs`).
+
 ## Supported workflow labels
 
 The following labels are the complete workflow state vocabulary:

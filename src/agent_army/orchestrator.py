@@ -89,6 +89,32 @@ class _Task:
     invocation_mode: str | None = None
 
 
+@dataclass(frozen=True)
+class DryRunCandidate:
+    """One issue considered and skipped during a dry-run scan."""
+
+    issue_number: int
+    reason: str
+
+
+@dataclass(frozen=True)
+class DryRunOutcome:
+    """A preview of what run_once() would do next, without any side effects.
+
+    status is one of "no-open-issues", "no-eligible-issue", "would-invoke", or
+    "would-recover". The latter two describe the single selected issue; every
+    issue considered and passed over along the way is recorded in `skipped`.
+    """
+
+    status: str
+    issue_number: int | None = None
+    current_label: str | None = None
+    role: str | None = None
+    mode: str | None = None
+    next_state: str | None = None
+    skipped: tuple[DryRunCandidate, ...] = ()
+
+
 MARKER_PATTERN = re.compile(r"<!-- agent-army:(?P<kind>\w+) (?P<attributes>[^>]+?) -->")
 ATTRIBUTE_PATTERN = re.compile(r"(?P<key>[a-z_]+)=(?P<value>[^\s]+)")
 
@@ -198,6 +224,46 @@ class IssueOrchestrator:
             return self._run_task(target, work_item, task)
         return OrchestrationOutcome("idle")
 
+    def dry_run(self) -> DryRunOutcome:
+        """Preview run_once()'s selection for the next pass, read-only.
+
+        Walks the same eligibility scan as run_once()/_select_task() over every
+        open issue in ascending order, but never reaches a write call: no
+        comment, label update, executor/Codex invocation, or git/worktree
+        operation happens. For the selected issue (if any), also distinguishes
+        whether the real pass would invoke the agent or only recover a label
+        (see _describe_selection) -- the two are easy to conflate from the
+        selected task alone, since several _run_* methods short-circuit to a
+        label-only transition when a matching result is already posted.
+        """
+        issues = self._project_owner_github.list_open_issues(self.owner, self.repository)
+        sorted_issues = sorted(issues, key=lambda item: int(item["number"]))
+        if not sorted_issues:
+            return DryRunOutcome("no-open-issues")
+        skipped: list[DryRunCandidate] = []
+        for issue in sorted_issues:
+            target = GitHubTarget(self.owner, self.repository, int(issue["number"]), "issue")
+            work_item = self._reader.read(target)
+            task, reason = self._evaluate_task(work_item)
+            if task is None:
+                skipped.append(DryRunCandidate(target.number, reason))
+                continue
+            labels = [str(label) for label in work_item["issue"].get("labels", [])]
+            current_label = next(
+                (label for label in labels if label in WORKFLOW_STATES), SOURCE_UNLABELED
+            )
+            status, next_state = self._describe_selection(work_item, task)
+            return DryRunOutcome(
+                status,
+                issue_number=target.number,
+                current_label=current_label,
+                role=task.agent.name,
+                mode=task.invocation_mode,
+                next_state=next_state,
+                skipped=tuple(skipped),
+            )
+        return DryRunOutcome("no-eligible-issue", skipped=tuple(skipped))
+
     def run_forever(
         self,
         poll_interval: float,
@@ -217,39 +283,49 @@ class IssueOrchestrator:
             sleeper(poll_interval)
 
     def _select_task(self, work_item: dict[str, Any]) -> _Task | None:
+        task, _reason = self._evaluate_task(work_item)
+        return task
+
+    def _evaluate_task(self, work_item: dict[str, Any]) -> tuple[_Task | None, str]:
+        """Select a task, or explain why none is eligible right now.
+
+        The reason string is only for reporting (dry-run and diagnostics); it
+        has no effect on selection and is empty whenever a task is returned.
+        """
         issue = work_item["issue"]
         labels = [str(label) for label in issue.get("labels", [])]
         if ORCHESTRATION_PAUSED_LABEL in labels:
             # This human-controlled guard wins over intake and every workflow state.
-            return None
+            return None, "orchestration-paused"
         workflow_labels = [label for label in labels if label in WORKFLOW_STATES]
         comments = issue.get("comments", [])
 
         if len(workflow_labels) > 1:
             # Ambiguous state is left untouched until a human restores the invariant.
-            return None
+            return None, "ambiguous workflow labels: " + ", ".join(sorted(workflow_labels))
         if not workflow_labels:
             if self._has_completed_intake(comments):
-                return None
-            return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED)
+                return None, "unlabeled intake already completed"
+            return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED), ""
 
         current_state = workflow_labels[0]
         if current_state == "needs-user-guidance":
-            return None
+            return None, "needs-user-guidance (blocked on human)"
         if current_state == "ready-for-merge":
-            if OPTIMIZATION_REVIEWER in self._agents and self._needs_fresh_review(work_item):
-                return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review")
-            return None
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "ready-for-merge (optimization reviewer not configured)"
+            if self._needs_fresh_review(work_item):
+                return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review"), ""
+            return None, "ready-for-merge (no fresh review needed)"
         if current_state == "needs-grooming":
-            return _Task(self._agents[PROJECT_OWNER], current_state)
+            return _Task(self._agents[PROJECT_OWNER], current_state), ""
         if current_state == "needs-decision":
-            return _Task(self._agents[PROJECT_OWNER], current_state)
+            return _Task(self._agents[PROJECT_OWNER], current_state), ""
         if current_state == "needs-documentation":
-            return _Task(self._agents[DOCUMENTATION], current_state)
-        if (
-            current_state == "needs-requirements-challenge"
-            and OPTIMIZATION_REVIEWER in self._agents
-        ):
+            return _Task(self._agents[DOCUMENTATION], current_state), ""
+        if current_state == "needs-requirements-challenge":
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "needs-requirements-challenge (optimization reviewer not configured)"
             pending_round = self._latest_project_owner_challenge_round(comments)
             challenge_task = _Task(
                 self._agents[OPTIMIZATION_REVIEWER],
@@ -257,20 +333,82 @@ class IssueOrchestrator:
                 "requirements_challenge",
             )
             if self._find_requirements_challenge_result(comments, pending_round) is not None:
-                return challenge_task
+                return challenge_task, ""
             if self._latest_requirements_challenge_round(comments) >= 2:
                 # A second challenge may only be recovered, never started again.
-                return None
-            return challenge_task
-        if current_state == "needs-design-signoff" and OPTIMIZATION_REVIEWER in self._agents:
-            return _Task(
-                self._agents[OPTIMIZATION_REVIEWER], current_state, "design_signoff"
+                return None, "needs-requirements-challenge round >= 2 (recovery only)"
+            return challenge_task, ""
+        if current_state == "needs-design-signoff":
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "needs-design-signoff (optimization reviewer not configured)"
+            return (
+                _Task(self._agents[OPTIMIZATION_REVIEWER], current_state, "design_signoff"),
+                "",
             )
-        if current_state == "ready-for-development" and DEVELOPER in self._agents:
-            return _Task(self._agents[DEVELOPER], current_state)
-        if current_state == "needs-optimization-review" and OPTIMIZATION_REVIEWER in self._agents:
-            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state)
-        return None
+        if current_state == "ready-for-development":
+            if DEVELOPER not in self._agents:
+                return None, "ready-for-development (developer not configured)"
+            return _Task(self._agents[DEVELOPER], current_state), ""
+        if current_state == "needs-optimization-review":
+            if OPTIMIZATION_REVIEWER not in self._agents:
+                return None, "needs-optimization-review (optimization reviewer not configured)"
+            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state), ""
+        return None, f"unsupported workflow state: {current_state}"
+
+    def _describe_selection(
+        self, work_item: dict[str, Any], task: _Task
+    ) -> tuple[str, str | None]:
+        """Would the real pass invoke the agent, or only recover a label?
+
+        Mirrors the same recovered-result check each _run_* method makes
+        before doing any work, without performing the write that follows it.
+        Developer (ready-for-development) has no such check here: unlike the
+        other roles, none of its recovery paths (a blocked result, an existing
+        pull request) are gated on "does the next pass invoke Codex or not" in
+        a way distinguishable up front without duplicating _run_developer_task's
+        branching -- it is always reported as "would invoke".
+        """
+        comments = work_item["issue"].get("comments", [])
+        if task.agent.name == DEVELOPER:
+            return "would-invoke", None
+        if task.agent.name == OPTIMIZATION_REVIEWER:
+            if task.invocation_mode == "requirements_challenge":
+                pending_round = self._latest_project_owner_challenge_round(comments)
+                recovered = self._find_requirements_challenge_result(comments, pending_round)
+                if recovered is not None:
+                    return "would-recover", recovered.get("next")
+                return "would-invoke", None
+            if task.invocation_mode == "design_signoff":
+                design = self._find_final_design_comment(comments)
+                if design is not None and self._is_stamped(design):
+                    return "would-recover", "ready-for-development"
+                return "would-invoke", None
+            # ready-for-merge (already screened by _needs_fresh_review) and
+            # needs-optimization-review both run through _run_reviewer_task,
+            # which re-checks for a recovered review result or check run.
+            developer_marker = self._find_developer_marker(comments)
+            if developer_marker is None:
+                return "would-invoke", None
+            pull_target = GitHubTarget(
+                self.owner, self.repository, int(developer_marker["pr"]), "pull_request"
+            )
+            pull_conversation_target = GitHubTarget(
+                self.owner, self.repository, int(developer_marker["pr"]), "issue"
+            )
+            pull_request = self._reviewer_github.get_pull_request(pull_target)
+            head_sha = str(pull_request["head"]["sha"])
+            pull_comments = self._reviewer_github.get_issue_comments(pull_conversation_target)
+            recovered = self._find_review_result(pull_comments, task, head_sha)
+            if recovered is not None:
+                return "would-recover", recovered.get("next")
+            if self._find_review_check(head_sha) is not None:
+                return "would-recover", None
+            return "would-invoke", None
+        # Project Owner and Documentation both run through _run_issue_task.
+        recovered = self._find_result(comments, task)
+        if recovered is not None:
+            return "would-recover", recovered.get("next")
+        return "would-invoke", None
 
     def _run_task(
         self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
@@ -1368,3 +1506,24 @@ def _format_outcome(outcome: OrchestrationOutcome) -> str:
     role = f" ({outcome.role})" if outcome.role else ""
     detail = f": {outcome.detail}" if outcome.detail else ""
     return f"[{timestamp}] Agent Army poll complete: {outcome.status}{issue}{role}{detail}"
+
+
+def format_dry_run_outcome(outcome: DryRunOutcome) -> str:
+    """Render a DryRunOutcome as one human-readable report line."""
+    skipped = "; ".join(f"#{candidate.issue_number} {candidate.reason}" for candidate in outcome.skipped)
+    if outcome.status == "no-open-issues":
+        return "no open issues"
+    if outcome.status == "no-eligible-issue":
+        return f"no eligible issue (skipped: {skipped})" if skipped else "no eligible issue"
+    prefix = f"skipped: {skipped}; " if skipped else ""
+    mode = f" ({outcome.mode})" if outcome.mode else ""
+    label = outcome.current_label
+    if outcome.status == "would-invoke":
+        return f"{prefix}issue #{outcome.issue_number} [{label}] would invoke {outcome.role}{mode}"
+    if outcome.status == "would-recover":
+        next_state = outcome.next_state or "unknown next state"
+        return (
+            f"{prefix}issue #{outcome.issue_number} [{label}] would recover "
+            f"(relabel only, no agent invoked) -> {next_state}"
+        )
+    raise ValueError(f"Unknown dry-run status: {outcome.status}")
