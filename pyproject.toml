@@ -14,7 +14,11 @@ dependencies = [
 
 [project.scripts]
 verify-documentation-agent = "agent_army.verify_documentation_agent:main"
+read-work-item = "agent_army.read_work_item:main"
 read-documentation-task = "agent_army.read_documentation_task:main"
+execute-agent = "agent_army.execute_agent:main"
+publish-documentation-analysis = "agent_army.publish_documentation_analysis:main"
+run-documentation-agent = "agent_army.run_documentation_agent:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

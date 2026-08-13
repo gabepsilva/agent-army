@@ -46,6 +46,14 @@ class GitHubAppClient:
     def get_issue_comments(self, target: GitHubTarget) -> list[dict[str, Any]]:
         return self._request("GET", f"{self._issue_path(target)}/comments?per_page=100", self._token())
 
+    def create_issue_comment(self, target: GitHubTarget, body: str) -> dict[str, Any]:
+        """Post one validated orchestration result to its originating issue."""
+        if target.kind != "issue":
+            raise ValueError("Issue comments can only be posted to issue targets.")
+        return self._request(
+            "POST", f"{self._issue_path(target)}/comments", self._token(), {"body": body}
+        )
+
     def get_pull_request(self, target: GitHubTarget) -> dict[str, Any]:
         return self._request("GET", self._pull_path(target), self._token())
 

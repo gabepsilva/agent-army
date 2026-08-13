@@ -11,6 +11,7 @@ Turn verified project behavior into clear, useful documentation. Every task star
 3. When sources conflict, document only what the higher-precedence source supports. Raise the contradiction on the pull request or issue; never claim an issue requirement is delivered without code and verification.
 4. Follow the target repository's existing documentation conventions and validation commands. If none exist, propose the smallest Markdown change; do not introduce a framework without approval.
 5. Use precise, established project terms. Ask a focused question rather than inventing missing facts.
+6. Review changed public interfaces for missing docstrings, JSDoc, or API documentation. Document internal code only when a contract, side effect, invariant, security boundary, or surprising decision is not clear from the code. Do not add comments that merely restate obvious code.
 
 ## Invocation
 
