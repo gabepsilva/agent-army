@@ -131,7 +131,13 @@ Reviewer publishes the same explicit outcome as an issue result and as the
 Start, execution-failure, and retry diagnostics remain local orchestrator
 outcomes or concise terminal reports; they are not posted as issue comments.
 Agent subprocesses never receive a GitHub App private key,
-installation token, credential broker, or GitHub client. Only the explicitly
+installation token, credential broker, or GitHub client. They also run with
+`gh`'s and git's own credential lookups redirected to an empty, per-invocation
+directory, so a role card with shell access has no ambient `gh`/git session to
+fall back on either — the App-authenticated orchestrator client is the only
+path to GitHub. This isolation lives in the shared executor, not in any one
+backend's own sandbox, so it holds regardless of which coding-agent CLI runs
+the role card. Only the explicitly
 selected Domain Modeling reference is injected for each configured role;
 unrelated reference content is not copied into the prompt.
 

@@ -21,6 +21,7 @@ class CodexCliExecutorTests(unittest.TestCase):
             captured["command"] = command
             captured["prompt"] = kwargs["input"]
             captured["stderr"] = kwargs["stderr"]
+            captured["env"] = kwargs["env"]
             return subprocess.CompletedProcess(command, 0, stdout='{"summary":"ok"}', stderr=None)
 
         with tempfile.TemporaryDirectory() as directory:
@@ -50,6 +51,10 @@ class CodexCliExecutorTests(unittest.TestCase):
         self.assertIn("untrusted data", captured["prompt"])
         self.assertIn("# Domain Modeling reference", captured["prompt"])
         self.assertNotIn("# Unrelated reference", captured["prompt"])
+        # Shared across both backends: the credential-isolation env applies
+        # regardless of which coding-agent CLI is executing the role card.
+        self.assertNotIn("SSH_AUTH_SOCK", captured["env"])
+        self.assertIn("agent-army-credential-isolation-", captured["env"]["GH_CONFIG_DIR"])
 
 
 class ClaudeCliExecutorTests(unittest.TestCase):
@@ -100,6 +105,14 @@ class ClaudeCliExecutorTests(unittest.TestCase):
         self.assertIn("untrusted data", captured["prompt"])
         self.assertNotIn("ANTHROPIC_API_KEY", captured["env"])
         self.assertNotIn("GITHUB_TOKEN", captured["env"])
+        self.assertNotIn("SSH_AUTH_SOCK", captured["env"])
+        # gh/git credential lookups are redirected to an empty, per-run
+        # directory rather than the operator's real ~/.config/gh or
+        # ~/.gitconfig, so a Bash-capable agent can't authenticate to GitHub
+        # as the operator even with full shell access.
+        self.assertIn("agent-army-credential-isolation-", captured["env"]["GH_CONFIG_DIR"])
+        self.assertEqual(captured["env"]["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertIn("IdentityFile=/dev/null", captured["env"]["GIT_SSH_COMMAND"])
 
     def test_applies_configured_permission_mode_and_model(self) -> None:
         captured = {}

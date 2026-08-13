@@ -46,9 +46,16 @@ uv run execute-agent \
 
 The executor does not pass GitHub App credentials, GitHub tokens, or provider
 API keys into the agent; both CLIs authenticate from their own credential store,
-and GitHub operations remain in the Python orchestrator. Agent subprocess
-progress is captured quietly; only the final JSON result is used by the
-workflow. If the role directory contains
+and GitHub operations remain in the Python orchestrator. It also redirects
+`gh`'s and git's own credential lookups (`GH_CONFIG_DIR`, `GIT_CONFIG_GLOBAL`,
+`GIT_CONFIG_NOSYSTEM`, `GIT_SSH_COMMAND`, `SSH_AUTH_SOCK`) to an empty,
+per-invocation directory, so a role card with shell access can't authenticate
+to GitHub as the operator via their own ambient `gh`/git session — the only
+path to GitHub stays the orchestrator's App-token-authenticated client. This
+is shared, backend-independent code in `CliAgentExecutor`, so it applies to
+every coding-agent CLI the same way, including ones not yet added. Agent
+subprocess progress is captured quietly; only the final JSON result is used by
+the workflow. If the role directory contains
 the supported Domain Modeling reference, its selected skill text is embedded
 in the prompt explicitly; unrelated reference files are not included.
 

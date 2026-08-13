@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,20 @@ SENSITIVE_ENVIRONMENT_VARIABLES = (
     "CLAUDE_CODE_OAUTH_TOKEN",
     "GH_TOKEN",
     "GITHUB_TOKEN",
+)
+
+# Ambient credential surfaces a Bash-capable agent could reach for on its own,
+# bypassing the orchestrator's mediated GitHub client entirely -- this is how
+# a project-owner run once posted to a GitHub issue as the human operator
+# instead of the bot identity: `gh` and git's credential helpers don't read
+# GH_TOKEN/GITHUB_TOKEN, they read the operator's own on-disk session, which
+# stripping those two env vars never touched. Every entry below is generic to
+# `gh`/git/ssh, not to any one coding-agent CLI, so it applies unchanged to
+# whichever backend runs the role card, including ones not written yet.
+AMBIENT_CREDENTIAL_ENVIRONMENT_VARIABLES = (
+    "SSH_AUTH_SOCK",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
 )
 
 
@@ -99,18 +114,19 @@ class CliAgentExecutor:
 
     def execute(self, request: AgentExecutionRequest) -> AgentExecutionResult:
         self._validate_request(request)
-        result = self._command_runner(
-            self._command(request),
-            cwd=request.workspace,
-            input=self._prompt(request),
-            text=True,
-            stdout=subprocess.PIPE,
-            # Keep agent tool activity out of the operator terminal. The final
-            # structured result is the only agent output used by the workflow.
-            stderr=subprocess.PIPE,
-            check=False,
-            env=self._environment(),
-        )
+        with tempfile.TemporaryDirectory(prefix="agent-army-credential-isolation-") as isolated_dir:
+            result = self._command_runner(
+                self._command(request),
+                cwd=request.workspace,
+                input=self._prompt(request),
+                text=True,
+                stdout=subprocess.PIPE,
+                # Keep agent tool activity out of the operator terminal. The final
+                # structured result is the only agent output used by the workflow.
+                stderr=subprocess.PIPE,
+                check=False,
+                env=self._environment(Path(isolated_dir)),
+            )
         if result.returncode != 0:
             raise RuntimeError(
                 f"{self.name} execution failed; see the local orchestrator failure status."
@@ -165,10 +181,22 @@ class CliAgentExecutor:
         )
 
     @staticmethod
-    def _environment() -> dict[str, str]:
+    def _environment(isolated_credentials_dir: Path) -> dict[str, str]:
         environment = os.environ.copy()
         for variable in SENSITIVE_ENVIRONMENT_VARIABLES:
             environment.pop(variable, None)
+        for variable in AMBIENT_CREDENTIAL_ENVIRONMENT_VARIABLES:
+            environment.pop(variable, None)
+        # Redirect gh's and git's own credential lookups to an empty,
+        # per-invocation directory instead of the operator's real ones. The
+        # coding-agent CLI's own provider auth (e.g. ~/.claude, ~/.codex) is
+        # untouched -- only GitHub- and git-credential-specific lookups move.
+        environment["GH_CONFIG_DIR"] = str(isolated_credentials_dir)
+        environment["GIT_CONFIG_GLOBAL"] = str(isolated_credentials_dir / "gitconfig-empty")
+        environment["GIT_CONFIG_NOSYSTEM"] = "1"
+        environment["GIT_SSH_COMMAND"] = (
+            "ssh -o IdentitiesOnly=yes -o IdentityFile=/dev/null -o BatchMode=yes"
+        )
         return environment
 
 
