@@ -7,6 +7,36 @@
     },
     "reviewed_commit": { "type": "string", "minLength": 7 },
     "summary": { "type": "string" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "severity": {
+            "type": "string",
+            "enum": ["blocking", "should-fix", "nit"]
+          },
+          "claim": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["id", "severity", "claim", "evidence"],
+        "additionalProperties": false
+      }
+    },
+    "dispute_responses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": { "type": "string", "minLength": 1 },
+          "disposition": { "type": "string", "enum": ["conceded", "held"] },
+          "rationale": { "type": "string" }
+        },
+        "required": ["finding_id", "disposition", "rationale"],
+        "additionalProperties": false
+      }
+    },
     "evidence": { "type": "array", "items": { "type": "string" } },
     "questions": { "type": "array", "items": { "type": "string" }, "maxItems": 1 },
     "recommended_actions": { "type": "array", "items": { "type": "string" } },
@@ -17,6 +47,8 @@
     "outcome",
     "reviewed_commit",
     "summary",
+    "findings",
+    "dispute_responses",
     "evidence",
     "questions",
     "recommended_actions",

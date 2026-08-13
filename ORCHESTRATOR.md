@@ -117,6 +117,35 @@ Every review is tied to the exact head SHA. A later commit has no matching
 review marker and therefore requires a fresh review. Optimization Reviewer is a
 separate role and does not modify the pull request.
 
+## Convergence between Developer and Reviewer
+
+A review finding is a claim, not an order. Both roles are pointed at the same
+goal — converge on a change that makes the project succeed, or on an
+evidence-based recommendation not to build it — and the orchestrator enforces
+that neither side may disengage:
+
+- Reviewer findings are structured: a stable `id`, a severity of `blocking`,
+  `should-fix`, or `nit`, a claim, and evidence. Only `blocking` gates the
+  outcome, so a nit no longer costs a full revise cycle.
+- Developer must accept or dispute **every** blocking finding. A validated
+  result that silently omits one is rejected and retried.
+- Reviewer must then concede or hold **every** dispute. Conceding drops the
+  finding; holding keeps it and requires counter-evidence.
+- Blocking findings and disputes — the two moves that cost the other side real
+  work — must cite something re-checkable: a `path/file.py:120`, a
+  `` `command` ``, or a URL. This is a deliberately lenient anchor check; it
+  cannot tell a good argument from a bad one, only an anchored one from
+  "typically you'd want…".
+
+Rounds are not capped: an argument runs until it converges. After
+`MAX_CONVERGENCE_ROUNDS` (7) the issue moves to `needs-user-guidance` with the
+contested blocking findings attached, rather than spending further agent runs
+on an argument that is not converging.
+
+The structured state of the argument is embedded in each durable comment as an
+`agent-army:payload` block, so a restarted orchestrator resumes the argument
+where it left off instead of starting a fresh one.
+
 ## Durable comments
 
 Each successful state-changing task creates exactly one final result comment

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 
@@ -56,6 +58,56 @@ _PLACEHOLDER_TEXT = {
 _MIN_SUMMARY_LENGTH = 15
 _MIN_LIST_ITEM_LENGTH = 10
 _PROSE_LIST_FIELDS = ("evidence", "recommended_actions", "questions")
+
+BLOCKING = "blocking"
+FINDING_SEVERITIES = {BLOCKING, "should-fix", "nit"}
+DEVELOPER_DISPOSITIONS = {"accepted", "disputed"}
+REVIEWER_DISPOSITIONS = {"conceded", "held"}
+# Rounds are deliberately not capped: an argument runs until it converges. This
+# is the point at which an unconverged argument stops being productive and gets
+# a human involved instead of quietly spending more on further rounds.
+MAX_CONVERGENCE_ROUNDS = 7
+
+# A claim that cannot be re-checked is an opinion. Blocking findings and
+# disputes -- the two moves that cost the other side real work -- must point at
+# something the other agent can independently verify: a file:line, a backticked
+# command or symbol, or a URL. This is deliberately lenient; it cannot tell a
+# good argument from a bad one, only an anchored one from "typically you'd
+# want...".
+_RECHECKABLE_PATTERNS = (
+    re.compile(r"[\w./-]+\.\w+:\d+"),
+    re.compile(r"`[^`]+`"),
+    re.compile(r"https?://\S+"),
+)
+_PAYLOAD_PATTERN = re.compile(r"<!-- agent-army:payload (?P<payload>\{.*?\}) -->", re.DOTALL)
+
+
+def _is_recheckable(text: str) -> bool:
+    return any(pattern.search(text) for pattern in _RECHECKABLE_PATTERNS)
+
+
+def encode_payload(payload: dict[str, Any]) -> str:
+    """Embed durable structured state in a comment.
+
+    The rendered prose is for humans; this is the machine-readable record the
+    next round reads back, so an argument survives an orchestrator restart.
+    `>` is escaped so a finding's own text can never terminate the HTML
+    comment early.
+    """
+    serialized = json.dumps(payload, separators=(",", ":")).replace(">", "\\u003e")
+    return f"<!-- agent-army:payload {serialized} -->"
+
+
+def decode_payload(body: str) -> dict[str, Any]:
+    """Read back the structured state embedded by encode_payload."""
+    match = _PAYLOAD_PATTERN.search(body or "")
+    if match is None:
+        return {}
+    try:
+        payload = json.loads(match["payload"])
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _reject_placeholder_text(field: str, text: str, *, min_length: int) -> None:
@@ -151,8 +203,16 @@ def validate_orchestration_result(
         raise ValueError(f"Unsupported orchestrated role: {role}")
 
 
-def validate_developer_result(result: dict[str, Any]) -> None:
-    """Validate the implementation report returned by Developer."""
+def validate_developer_result(
+    result: dict[str, Any], open_findings: list[dict[str, Any]] | None = None
+) -> None:
+    """Validate the implementation report returned by Developer.
+
+    When the Developer is revising against review findings, it must take an
+    explicit position on every blocking one: fix it, or dispute it with
+    re-checkable evidence. Silent compliance and silent omission are both
+    rejected -- convergence requires an argument, not deference.
+    """
     validate_analysis_result(result)
     if result.get("status") not in {"completed", "blocked"}:
         raise ValueError("Developer must return completed or blocked status.")
@@ -162,6 +222,95 @@ def validate_developer_result(result: dict[str, Any]) -> None:
         raise ValueError("A blocked Developer result must include one focused question.")
     if result["status"] == "completed" and result["questions"]:
         raise ValueError("A completed Developer result cannot leave an unresolved question.")
+
+    responses = result.get("responses") or []
+    known_ids = {str(finding["id"]) for finding in (open_findings or [])}
+    seen: set[str] = set()
+    for response in responses:
+        finding_id = str(response["finding_id"])
+        if open_findings is not None and finding_id not in known_ids:
+            raise ValueError(f"Developer responded to an unknown finding: {finding_id}")
+        if finding_id in seen:
+            raise ValueError(f"Developer responded twice to finding {finding_id}.")
+        seen.add(finding_id)
+        if response["disposition"] not in DEVELOPER_DISPOSITIONS:
+            raise ValueError("Developer finding disposition must be accepted or disputed.")
+        _reject_placeholder_text(
+            "response rationale", response["rationale"], min_length=_MIN_LIST_ITEM_LENGTH
+        )
+        if response["disposition"] == "disputed" and not _is_recheckable(response["rationale"]):
+            raise ValueError(
+                f"Disputing finding {finding_id} requires re-checkable evidence "
+                "(a file:line, a `command`, or a URL)."
+            )
+
+    for finding in open_findings or []:
+        if finding.get("severity") == BLOCKING and str(finding["id"]) not in seen:
+            raise ValueError(
+                f"Developer must accept or dispute blocking finding {finding['id']}."
+            )
+
+
+def validate_review_findings(result: dict[str, Any], open_disputes: list[dict[str, Any]] | None = None) -> None:
+    """Validate a review's findings and its answers to the Developer's disputes.
+
+    The symmetric half of validate_developer_result: a Reviewer may not ignore
+    a dispute. It either concedes the finding or holds it with its own
+    re-checkable evidence.
+    """
+    findings = result.get("findings") or []
+    seen_ids: set[str] = set()
+    for finding in findings:
+        finding_id = str(finding["id"])
+        if finding_id in seen_ids:
+            raise ValueError(f"Duplicate finding id: {finding_id}")
+        seen_ids.add(finding_id)
+        if finding["severity"] not in FINDING_SEVERITIES:
+            raise ValueError("Finding severity must be blocking, should-fix, or nit.")
+        _reject_placeholder_text("finding claim", finding["claim"], min_length=_MIN_LIST_ITEM_LENGTH)
+        for item in finding["evidence"]:
+            _reject_placeholder_text("finding evidence", item, min_length=_MIN_LIST_ITEM_LENGTH)
+        if finding["severity"] == BLOCKING and not any(
+            _is_recheckable(item) for item in finding["evidence"]
+        ):
+            raise ValueError(
+                f"Blocking finding {finding_id} requires re-checkable evidence "
+                "(a file:line, a `command`, or a URL)."
+            )
+
+    has_blocking = any(finding["severity"] == BLOCKING for finding in findings)
+    if result["outcome"] == "approved" and has_blocking:
+        raise ValueError("A review cannot be approved while a blocking finding is open.")
+    if result["outcome"] == "changes-requested" and not has_blocking:
+        raise ValueError("changes-requested requires at least one blocking finding.")
+
+    answered = set()
+    for response in result.get("dispute_responses") or []:
+        finding_id = str(response["finding_id"])
+        if response["disposition"] not in REVIEWER_DISPOSITIONS:
+            raise ValueError("Reviewer dispute disposition must be conceded or held.")
+        _reject_placeholder_text(
+            "dispute response rationale", response["rationale"], min_length=_MIN_LIST_ITEM_LENGTH
+        )
+        if response["disposition"] == "held" and not _is_recheckable(response["rationale"]):
+            raise ValueError(
+                f"Holding disputed finding {finding_id} requires re-checkable counter-evidence."
+            )
+        if response["disposition"] == "held" and finding_id not in seen_ids:
+            raise ValueError(
+                f"Finding {finding_id} was held but is not in the current findings list."
+            )
+        if response["disposition"] == "conceded" and finding_id in seen_ids:
+            raise ValueError(
+                f"Finding {finding_id} was conceded but is still listed as an open finding."
+            )
+        answered.add(finding_id)
+
+    for dispute in open_disputes or []:
+        if str(dispute["finding_id"]) not in answered:
+            raise ValueError(
+                f"Reviewer must concede or hold disputed finding {dispute['finding_id']}."
+            )
 
 
 def render_developer_blocked_result(
@@ -195,7 +344,9 @@ def render_developer_blocked_result(
 
 
 def validate_optimization_review_result(
-    result: dict[str, Any], expected_commit: str
+    result: dict[str, Any],
+    expected_commit: str,
+    open_disputes: list[dict[str, Any]] | None = None,
 ) -> None:
     """Validate an independent review outcome for the exact PR head commit."""
     validate_analysis_result(result)
@@ -205,6 +356,7 @@ def validate_optimization_review_result(
         raise ValueError("Optimization Reviewer result does not match the current PR commit.")
     if result["files_changed"]:
         raise ValueError("Optimization Reviewer must not change files.")
+    validate_review_findings(result, open_disputes)
 
 
 def validate_requirements_challenge_result(
@@ -283,10 +435,13 @@ def render_developer_result(
 ) -> str:
     """Render Developer's validated implementation and PR handoff."""
     validate_developer_result(result)
+    responses = result.get("responses") or []
+    disputed = [item for item in responses if item["disposition"] == "disputed"]
     lines = [
         f"<!-- agent-army:result role=developer invocation={invocation_id} "
         f"from={source_state} next={next_state} pr={pull_request_number} "
         f"branch={branch} head={head_sha} -->",
+        encode_payload({"responses": responses}),
         "## Agent Army: Developer completed",
         "",
         result["summary"].strip(),
@@ -295,6 +450,15 @@ def render_developer_result(
         f"Branch: `{branch}`",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
     ]
+    if disputed:
+        lines.extend(
+            [
+                "",
+                f"Disputing {len(disputed)} review finding(s); the Reviewer must "
+                "concede or hold each one.",
+            ]
+        )
+    lines.extend(render_developer_responses(responses))
     _append_section(lines, "Evidence", result["evidence"])
     _append_section(lines, "Focused question", result["questions"])
     _append_section(lines, "Recommended actions", result["recommended_actions"])
@@ -332,10 +496,86 @@ def render_optimization_review_result(
         f"Commit reviewed: `{head_sha}`",
         f"Workflow transition: `{source_state}` → `{next_state}`.",
     ]
+    _append_findings(lines, result.get("findings") or [])
+    _append_dispute_responses(lines, result.get("dispute_responses") or [])
     _append_section(lines, "Evidence", result["evidence"])
     _append_section(lines, "Questions", result["questions"])
     _append_section(lines, "Recommended actions", result["recommended_actions"])
     lines.extend(["", "_This review did not modify the pull request._"])
+    return "\n".join(lines)
+
+
+def _append_findings(lines: list[str], findings: list[dict[str, Any]]) -> None:
+    if not findings:
+        return
+    order = {BLOCKING: 0, "should-fix": 1, "nit": 2}
+    lines.extend(["", "### Findings", ""])
+    for finding in sorted(findings, key=lambda item: order.get(item["severity"], 3)):
+        lines.append(f"- **[{finding['severity']}] {finding['id']}** — {finding['claim'].strip()}")
+        for item in finding["evidence"]:
+            lines.append(f"  - {item.strip()}")
+
+
+def _append_dispute_responses(lines: list[str], responses: list[dict[str, Any]]) -> None:
+    if not responses:
+        return
+    lines.extend(["", "### Answers to disputes", ""])
+    for response in responses:
+        lines.append(
+            f"- **{response['finding_id']}: {response['disposition']}** — "
+            f"{response['rationale'].strip()}"
+        )
+
+
+def render_developer_responses(responses: list[dict[str, Any]]) -> list[str]:
+    """Render the Developer's position on each review finding."""
+    if not responses:
+        return []
+    lines = ["", "### Responses to review findings", ""]
+    for response in responses:
+        lines.append(
+            f"- **{response['finding_id']}: {response['disposition']}** — "
+            f"{response['rationale'].strip()}"
+        )
+    return lines
+
+
+def render_convergence_escalation(
+    *,
+    source_state: str,
+    next_state: str,
+    invocation_id: str,
+    pull_request_number: int,
+    pull_request_url: str,
+    round_number: int,
+    open_findings: list[dict[str, Any]],
+) -> str:
+    """Hand an unconverged argument to a human after MAX_CONVERGENCE_ROUNDS.
+
+    Convergence is the goal, but an argument that has not converged in this
+    many rounds is not going to converge by spending another agent run on it.
+    """
+    lines = [
+        f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
+        f"from={source_state} next={next_state} kind=escalation "
+        f"pr={pull_request_number} round={round_number} -->",
+        "## Agent Army: review did not converge",
+        "",
+        f"Developer and Optimization Reviewer have exchanged {round_number} rounds on "
+        f"[pull request #{pull_request_number}]({pull_request_url}) without resolving "
+        "every blocking finding. Further rounds are unlikely to converge on their own, "
+        "so this needs a human decision.",
+        "",
+        f"Workflow transition: `{source_state}` → `{next_state}`.",
+    ]
+    _append_findings(lines, open_findings)
+    lines.extend(
+        [
+            "",
+            "_Resolve the contested findings above, then replace this label with an "
+            "actionable workflow state._",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -349,31 +589,48 @@ def render_optimization_review_marker_comment(
     pull_request_url: str,
     branch: str,
     head_sha: str,
+    round_number: int = 1,
+    findings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render the durable issue-side marker for a review outcome.
 
-    The full findings (evidence, questions, recommended actions) belong on
-    the pull request, next to the diff and discussion they're about. The
-    issue only needs the durable marker plus enough for a human skimming the
-    issue to know what happened and where to read the rest.
+    The full argument belongs on the pull request, next to the diff it's
+    about. The issue keeps the durable workflow record: the marker, a
+    convergence status a human can read in seconds, and the embedded payload
+    the next round reads back.
     """
-    return "\n".join(
+    findings = findings or []
+    blocking = [finding for finding in findings if finding["severity"] == BLOCKING]
+    lines = [
+        f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
+        f"from={source_state} next={next_state} outcome={outcome} "
+        f"pr={pull_request_number} branch={branch} head={head_sha} "
+        f"round={round_number} -->",
+        encode_payload({"findings": findings, "round": round_number}),
+        f"## Agent Army: Optimization Reviewer completed — round {round_number}",
+        "",
+        f"Outcome: **{outcome}**",
+        "",
+        f"Convergence: **{len(blocking)} blocking**, "
+        f"{len([f for f in findings if f['severity'] == 'should-fix'])} should-fix, "
+        f"{len([f for f in findings if f['severity'] == 'nit'])} nit",
+        "",
+        f"Full review: [pull request #{pull_request_number}]({pull_request_url})",
+        f"Commit reviewed: `{head_sha}`",
+        f"Workflow transition: `{source_state}` → `{next_state}`.",
+    ]
+    if blocking:
+        lines.extend(["", "### Open blocking findings", ""])
+        for finding in blocking:
+            lines.append(f"- **{finding['id']}** — {finding['claim'].strip()}")
+    lines.extend(
         [
-            f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
-            f"from={source_state} next={next_state} outcome={outcome} "
-            f"pr={pull_request_number} branch={branch} head={head_sha} -->",
-            "## Agent Army: Optimization Reviewer completed",
             "",
-            f"Outcome: **{outcome}**",
-            "",
-            f"Full review: [pull request #{pull_request_number}]({pull_request_url})",
-            f"Commit reviewed: `{head_sha}`",
-            f"Workflow transition: `{source_state}` → `{next_state}`.",
-            "",
-            "_The full findings were posted on the pull request; this comment is "
+            "_The full argument was posted on the pull request; this comment is "
             "the durable workflow record._",
         ]
     )
+    return "\n".join(lines)
 
 
 def render_requirements_challenge_result(

@@ -26,9 +26,13 @@ from agent_army.git_worktrees import (
     run_git,
 )
 from agent_army.publishers import (
+    BLOCKING,
+    MAX_CONVERGENCE_ROUNDS,
     OPTIMIZATION_REVIEW_CHECK_NAME,
     REVIEW_OUTCOME_STATES,
     WORKFLOW_STATES,
+    decode_payload,
+    render_convergence_escalation,
     render_developer_blocked_result,
     render_developer_result,
     render_optimization_review_marker_comment,
@@ -534,6 +538,11 @@ class IssueOrchestrator:
         pull_target = GitHubTarget(self.owner, self.repository, pull_number, "pull_request")
         implementation_work_item = WorkItemReader(task.agent.github).read(pull_target)
         implementation_work_item["source_issue"] = work_item
+        comments = work_item["issue"].get("comments", [])
+        # The findings the Developer is answering. It must fix or dispute each
+        # blocking one; validate_developer_result rejects silent omission.
+        open_findings = self._open_review_findings(comments)
+        implementation_work_item["review_findings"] = open_findings
         head_sha = str(pull_request["head"]["sha"])
         try:
             run_git(
@@ -559,10 +568,22 @@ class IssueOrchestrator:
                 )
                 self._total_cost_usd += execution.cost_usd
                 result = execution.output
-                validate_developer_result(result)
+                validate_developer_result(result, open_findings)
                 if result["status"] != "completed":
+                    # Route the question to Project Owner and hand over the
+                    # label. Previously this returned with no comment and no
+                    # transition, so the issue stayed in ready-for-development
+                    # and every later poll re-ran the whole agent again.
+                    blocked_comment = render_developer_blocked_result(
+                        result,
+                        source_state=task.source_state,
+                        next_state="needs-decision",
+                        invocation_id=self._id_factory(),
+                    )
+                    task.agent.github.create_issue_comment(target, blocked_comment)
+                    self._apply_transition(target, work_item, task, "needs-decision")
                     return OrchestrationOutcome(
-                        "blocked", target.number, task.agent.name, result["summary"]
+                        "processed", target.number, task.agent.name, result["summary"]
                     )
                 new_head_sha = commit_and_push(
                     worktree,
@@ -731,6 +752,8 @@ class IssueOrchestrator:
                     branch=attributes.get("branch", pull_request["head"]["ref"]),
                     head_sha=attributes.get("head", head_sha),
                     pull_request_url=pull_request["html_url"],
+                    round_number=int(attributes.get("round") or 1),
+                    findings=decode_payload(summary).get("findings") or [],
                 )
                 self._reviewer_github.create_issue_comment(target, issue_comment)
                 self._apply_transition(target, work_item, task, next_state)
@@ -738,8 +761,38 @@ class IssueOrchestrator:
                 return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
             return OrchestrationOutcome("recovered", target.number, task.agent.name)
 
+        round_number = self._review_round(comments, pull_number) + 1
+        if round_number > MAX_CONVERGENCE_ROUNDS:
+            # The argument is not converging on its own. Stop spending agent
+            # runs on it and put the contested findings in front of a human.
+            try:
+                escalation = render_convergence_escalation(
+                    source_state=task.source_state,
+                    next_state="needs-user-guidance",
+                    invocation_id=self._id_factory(),
+                    pull_request_number=pull_number,
+                    pull_request_url=pull_request["html_url"],
+                    round_number=round_number - 1,
+                    open_findings=[
+                        finding
+                        for finding in self._open_review_findings(comments)
+                        if finding.get("severity") == BLOCKING
+                    ],
+                )
+                self._reviewer_github.create_issue_comment(target, escalation)
+                self._apply_transition(target, work_item, task, "needs-user-guidance")
+            except Exception as error:
+                return OrchestrationOutcome("failed", target.number, task.agent.name, str(error))
+            return OrchestrationOutcome("escalated", target.number, task.agent.name)
+
+        open_disputes = self._open_developer_disputes(comments)
         review_work_item = self._review_reader.read(pull_target)
         review_work_item["source_issue"] = work_item
+        # The argument so far, structured: what the Developer disputed and
+        # why, and this round's number. The Reviewer must answer each dispute.
+        review_work_item["open_disputes"] = open_disputes
+        review_work_item["prior_findings"] = self._open_review_findings(comments)
+        review_work_item["review_round"] = round_number
         try:
             with self._worktree_factory(
                 self._workspace,
@@ -759,7 +812,7 @@ class IssueOrchestrator:
                 )
                 self._total_cost_usd += execution.cost_usd
                 result = execution.output
-                validate_optimization_review_result(result, head_sha)
+                validate_optimization_review_result(result, head_sha, open_disputes)
                 status = run_git(
                     ["git", "status", "--porcelain"],
                     worktree.path,
@@ -788,6 +841,8 @@ class IssueOrchestrator:
                 branch=pull_request["head"]["ref"],
                 head_sha=head_sha,
                 pull_request_url=pull_request["html_url"],
+                round_number=round_number,
+                findings=result.get("findings") or [],
             )
             conclusion = {
                 "approved": "success",
@@ -850,6 +905,46 @@ class IssueOrchestrator:
         except Exception:
             return
         work_item["pull_request"] = pull_work_item["pull_request"]
+
+    @staticmethod
+    def _latest_payload(comments: Iterable[dict[str, Any]], role: str) -> dict[str, Any]:
+        """Read back the newest structured argument state posted by one role.
+
+        The rendered prose is for humans; this is what the next round actually
+        reasons over, so a restarted orchestrator resumes the argument where it
+        left off instead of starting a fresh one.
+        """
+        for comment in reversed(list(comments)):
+            body = str(comment.get("body") or "")
+            if f"role={role}" not in body:
+                continue
+            payload = decode_payload(body)
+            if payload:
+                return payload
+        return {}
+
+    def _open_review_findings(self, comments: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The findings the Developer must currently answer for."""
+        return list(self._latest_payload(comments, OPTIMIZATION_REVIEWER).get("findings") or [])
+
+    def _open_developer_disputes(
+        self, comments: Iterable[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """The Developer disputes the Reviewer must currently concede or hold."""
+        comments = list(comments)
+        responses = self._latest_payload(comments, DEVELOPER).get("responses") or []
+        return [item for item in responses if item.get("disposition") == "disputed"]
+
+    @staticmethod
+    def _review_round(comments: Iterable[dict[str, Any]], pull_number: int) -> int:
+        """How many review rounds this pull request has already had."""
+        return sum(
+            1
+            for attributes in _iter_markers(comments)
+            if attributes.get("kind") == "result"
+            and attributes.get("role") == OPTIMIZATION_REVIEWER
+            and attributes.get("pr") == str(pull_number)
+        )
 
     def _find_developer_marker(self, comments: Iterable[dict[str, Any]]) -> dict[str, str] | None:
         for attributes in reversed(list(_iter_markers(comments))):

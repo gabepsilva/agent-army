@@ -5,6 +5,7 @@ from pathlib import Path
 from agent_army.git_worktrees import WorktreeResult
 from agent_army.agent_executor import AgentExecutionResult
 from agent_army.orchestrator import IssueOrchestrator
+from agent_army.publishers import MAX_CONVERGENCE_ROUNDS, decode_payload, encode_payload
 from agent_army.work_items import WorkItemReader
 
 
@@ -49,9 +50,33 @@ def review_result() -> dict:
         "outcome": "approved",
         "reviewed_commit": "developer-sha",
         "summary": "No blocking optimization findings.",
+        "findings": [],
+        "dispute_responses": [],
         "evidence": ["Tests and changed files were inspected."],
         "questions": [],
         "recommended_actions": [],
+        "files_changed": [],
+        "commands_run": ["uv run python -m unittest"],
+    }
+
+
+def blocking_review_result() -> dict:
+    return {
+        "outcome": "changes-requested",
+        "reviewed_commit": "developer-sha",
+        "summary": "One blocking finding on the retry path.",
+        "findings": [
+            {
+                "id": "F1",
+                "severity": "blocking",
+                "claim": "The retry path re-runs the agent on every failure.",
+                "evidence": ["src/example.py:42 runs before the guard."],
+            }
+        ],
+        "dispute_responses": [],
+        "evidence": ["Read src/example.py:42."],
+        "questions": [],
+        "recommended_actions": ["Move the guard ahead of the agent run."],
         "files_changed": [],
         "commands_run": ["uv run python -m unittest"],
     }
@@ -287,6 +312,86 @@ class DeveloperReviewWorkflowTests(unittest.TestCase):
         pull_request = executor.requests[0].work_item.get("pull_request")
         self.assertIsNotNone(pull_request)
         self.assertEqual(pull_request["head"], "agent-army/issue-7-test-issue")
+
+    def test_review_findings_reach_the_developer_and_round_is_tracked(self) -> None:
+        # A blocking finding published in round 1 must be handed to the
+        # Developer as structured state on its next run, so it can accept or
+        # dispute it rather than guessing from prose.
+        review = blocking_review_result()
+        github = FakeWorkflowGitHub(["needs-optimization-review"], [
+            {
+                "body": "<!-- agent-army:result role=developer from=ready-for-development "
+                "next=needs-optimization-review pr=9 branch=agent-army/issue-7-test-issue "
+                "head=developer-sha -->"
+            }
+        ])
+        executor = FakeExecutor(review)
+
+        self.make_orchestrator(github, executor, review_clean=True).run_once()
+
+        self.assertEqual(github.labels, ["ready-for-development"])
+        marker = github.comments[-1]["body"]
+        self.assertIn("round=1", marker)
+        self.assertIn("1 blocking", marker)
+        self.assertEqual(decode_payload(marker)["findings"][0]["id"], "F1")
+
+    def test_unconverged_argument_escalates_to_a_human_after_round_seven(self) -> None:
+        developer_marker = {
+            "body": "<!-- agent-army:result role=developer from=ready-for-development "
+            "next=needs-optimization-review pr=9 branch=agent-army/issue-7-test-issue "
+            "head=developer-sha -->"
+        }
+        # Seven rounds already argued without converging. Each round reviewed
+        # a different commit, because the Developer pushed a revision between
+        # them -- so none of them recovers against the current head.
+        prior_rounds = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                f"from=needs-optimization-review next=ready-for-development outcome=changes-requested "
+                f"pr=9 head=round-{index}-sha round={index} -->\n"
+                + encode_payload({"findings": [blocking_review_result()["findings"][0]], "round": index})
+            }
+            for index in range(1, MAX_CONVERGENCE_ROUNDS + 1)
+        ]
+        github = FakeWorkflowGitHub(
+            ["needs-optimization-review"], [developer_marker, *prior_rounds]
+        )
+        executor = FakeExecutor(review_result())
+
+        outcome = self.make_orchestrator(github, executor, review_clean=True).run_once()
+
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(github.labels, ["needs-user-guidance"])
+        # The whole point of the bound: no further agent spend.
+        self.assertEqual(len(executor.requests), 0)
+        self.assertIn("did not converge", github.comments[-1]["body"])
+        self.assertIn("F1", github.comments[-1]["body"])
+
+    def test_blocked_revision_hands_over_instead_of_rerunning_forever(self) -> None:
+        # A blocked result while revising an existing PR used to return with
+        # no comment and no transition, leaving the issue in
+        # ready-for-development so every later poll re-ran the whole agent.
+        developer_marker = {
+            "body": "<!-- agent-army:result role=developer from=ready-for-development "
+            "next=needs-optimization-review pr=9 branch=agent-army/issue-7-test-issue "
+            "head=developer-sha -->"
+        }
+        review_marker = {
+            "body": "<!-- agent-army:result role=optimization-reviewer "
+            "from=needs-optimization-review next=ready-for-development "
+            "outcome=changes-requested pr=9 head=developer-sha round=1 -->"
+        }
+        github = FakeWorkflowGitHub(
+            ["ready-for-development"], [developer_marker, review_marker]
+        )
+        github.pull_request["head"]["ref"] = "agent-army/issue-7-test-issue"
+        executor = FakeExecutor(blocked_developer_result())
+
+        outcome = self.make_orchestrator(github, executor).run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertEqual(github.labels, ["needs-decision"])
+        self.assertIn("Which audience", github.comments[-1]["body"])
 
     def test_reviewer_check_run_failure_does_not_block_transition_or_rerun_executor(self) -> None:
         # A permissions error creating the check run (seen in production as a

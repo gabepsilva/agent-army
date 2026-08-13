@@ -3,6 +3,19 @@
   "properties": {
     "status": { "type": "string", "enum": ["completed", "blocked"] },
     "summary": { "type": "string" },
+    "responses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": { "type": "string", "minLength": 1 },
+          "disposition": { "type": "string", "enum": ["accepted", "disputed"] },
+          "rationale": { "type": "string" }
+        },
+        "required": ["finding_id", "disposition", "rationale"],
+        "additionalProperties": false
+      }
+    },
     "evidence": { "type": "array", "items": { "type": "string" } },
     "questions": { "type": "array", "items": { "type": "string" }, "maxItems": 1 },
     "recommended_actions": { "type": "array", "items": { "type": "string" } },
@@ -12,6 +25,7 @@
   "required": [
     "status",
     "summary",
+    "responses",
     "evidence",
     "questions",
     "recommended_actions",
