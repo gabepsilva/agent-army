@@ -44,6 +44,27 @@ REQUIREMENTS_CHALLENGE_OUTCOMES = {
     "unable-to-assess",
 }
 
+# The JSON Schema only enforces shape (string/array-of-string), so a
+# schema-valid but content-empty response -- e.g. summary "test", evidence
+# ["a"] -- would otherwise sail through untouched and get published as the
+# durable record. These are deliberately blunt, deterministic checks against
+# obvious placeholder text, not a judgment of decision quality; a genuinely
+# short but real answer should still clear them easily.
+_PLACEHOLDER_TEXT = {
+    "test", "tests", "n/a", "na", "todo", "tbd", "wip", "x", "-", "a", "none", "...", "tba",
+}
+_MIN_SUMMARY_LENGTH = 15
+_MIN_LIST_ITEM_LENGTH = 10
+_PROSE_LIST_FIELDS = ("evidence", "recommended_actions", "questions")
+
+
+def _reject_placeholder_text(field: str, text: str, *, min_length: int) -> None:
+    stripped = text.strip()
+    if stripped.lower() in _PLACEHOLDER_TEXT or len(stripped) < min_length:
+        raise ValueError(
+            f"Analysis result {field} looks like placeholder text, not a real answer: {text!r}"
+        )
+
 
 def validate_analysis_result(result: dict[str, Any]) -> None:
     missing = REQUIRED_RESULT_FIELDS - result.keys()
@@ -56,6 +77,10 @@ def validate_analysis_result(result: dict[str, Any]) -> None:
             isinstance(item, str) for item in result[field]
         ):
             raise ValueError(f"Analysis result {field} must be a list of text items.")
+    _reject_placeholder_text("summary", result["summary"], min_length=_MIN_SUMMARY_LENGTH)
+    for field in _PROSE_LIST_FIELDS:
+        for item in result[field]:
+            _reject_placeholder_text(field, item, min_length=_MIN_LIST_ITEM_LENGTH)
 
 
 def render_documentation_analysis(result: dict[str, Any]) -> str:
