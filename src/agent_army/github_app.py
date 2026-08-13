@@ -135,6 +135,14 @@ class GitHubAppClient:
             "POST", f"/repos/{owner}/{repository}/check-runs", self._token(), body
         )
 
+    def compare_commits(self, owner: str, repository: str, base: str, head: str) -> dict[str, Any]:
+        """Compare two commits, for measuring how large a revision actually was."""
+        return self._request(
+            "GET",
+            f"/repos/{owner}/{repository}/compare/{quote(base)}...{quote(head)}",
+            self._token(),
+        )
+
     def get_check_runs(self, owner: str, repository: str, head_sha: str) -> list[dict[str, Any]]:
         response = self._request(
             "GET",

@@ -146,6 +146,35 @@ The structured state of the argument is embedded in each durable comment as an
 `agent-army:payload` block, so a restarted orchestrator resumes the argument
 where it left off instead of starting a fresh one.
 
+## Measuring convergence
+
+Convergence is a property of the process, not of the world: two agents agreeing
+tells you about the agents, not about the code. No check here judges whether an
+argument was *good* -- that needs a verifier at least as good as the arguers.
+
+`agent-army-report` reads the durable comments and computes cheap, deterministic
+signals so a human knows which arguments are worth opening:
+
+```bash
+uv run agent-army-report --repository OWNER/REPOSITORY
+```
+
+It makes no GitHub writes and needs no orchestrator changes; every input is read
+back from state the workflow already persists. It flags:
+
+- `clean-approval-on-large-diff` -- a first-round approval with no findings on a
+  substantial change.
+- `developer-never-disputed` -- the Developer accepted every finding, which is
+  deference rather than argument.
+- `reviewer-never-conceded` -- the Reviewer held every disputed finding.
+- `empty-fix-acceptance` -- a finding was accepted and the next commit changed
+  essentially nothing.
+- `escalated-unconverged` -- the argument hit MAX_CONVERGENCE_ROUNDS.
+
+A flag is not a verdict. It says an argument looks unusual and should be read,
+which is what makes the residual risk visible and samplable instead of assumed
+away.
+
 ## Durable comments
 
 Each successful state-changing task creates exactly one final result comment

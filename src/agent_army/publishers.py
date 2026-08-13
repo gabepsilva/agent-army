@@ -556,8 +556,12 @@ def render_convergence_escalation(
     many rounds is not going to converge by spending another agent run on it.
     """
     lines = [
-        f"<!-- agent-army:result role=optimization-reviewer invocation={invocation_id} "
-        f"from={source_state} next={next_state} kind=escalation "
+        # Its own marker kind: _iter_markers takes `kind` from the
+        # agent-army:<kind> prefix, so an escalation carrying kind=escalation
+        # as an attribute would read back as an ordinary result and be counted
+        # as another review round.
+        f"<!-- agent-army:escalation role=optimization-reviewer invocation={invocation_id} "
+        f"from={source_state} next={next_state} "
         f"pr={pull_request_number} round={round_number} -->",
         "## Agent Army: review did not converge",
         "",
