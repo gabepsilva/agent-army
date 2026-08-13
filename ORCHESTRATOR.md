@@ -93,13 +93,15 @@ acceptance-criteria draft in its durable result and route to
 concise issue result before returning control to Project Owner through
 `needs-decision`. It never selects final scope or routes directly to development.
 
-Challenge dialogue is bounded by durable result markers. The first challenge is
-round 1. Project Owner may request round 2 only when its revision materially
-changes scope and records that fact in its validated result. After round 2,
-Project Owner must resolve the findings or use `needs-user-guidance`; the
-orchestrator will not start a third challenge. A successful challenge invocation
-creates one final issue comment, and a label-update failure recovers from its
-marker without rerunning the Reviewer.
+Challenge dialogue runs to convergence rather than stopping at a fixed round.
+Each round is recorded by a durable result marker carrying the graded findings.
+Project Owner must accept or dispute every blocking finding, and the Reviewer
+must concede or hold every dispute, so a challenge ends when no blocking
+finding is open -- not when either side declares it over. If the argument has
+not converged after `MAX_CONVERGENCE_ROUNDS` (7), the issue moves to
+`needs-user-guidance` with the contested findings attached. A successful
+challenge invocation creates one issue comment, and a label-update failure
+recovers from its marker without rerunning the Reviewer.
 
 For `ready-for-development`, Developer runs in a temporary Git worktree. The
 orchestrator owns the branch commit, push, and pull-request creation, links the
