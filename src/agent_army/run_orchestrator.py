@@ -19,22 +19,36 @@ def run(
     *,
     project_owner_directory: Path,
     documentation_directory: Path,
+    developer_directory: Path,
+    reviewer_directory: Path,
     output_schema_path: Path,
+    developer_output_schema_path: Path,
+    reviewer_output_schema_path: Path,
+    requirements_challenge_output_schema_path: Path,
     poll_interval: float = 60.0,
     once: bool = False,
 ) -> str:
     """Start the configured polling service and return a one-shot status."""
     owner_config = load_github_app_config(project_owner_directory / "agent-config.yaml")
     documentation_config = load_github_app_config(documentation_directory / "agent-config.yaml")
+    developer_config = load_github_app_config(developer_directory / "agent-config.yaml")
+    reviewer_config = load_github_app_config(reviewer_directory / "agent-config.yaml")
     with SessionCredentialBroker() as broker:
         orchestrator = IssueOrchestrator(
             repository=repository,
             project_owner_github=GitHubAppClient(owner_config, broker),
             documentation_github=GitHubAppClient(documentation_config, broker),
+            developer_github=GitHubAppClient(developer_config, broker),
+            reviewer_github=GitHubAppClient(reviewer_config, broker),
             workspace=workspace,
             project_owner_role=project_owner_directory / "ROLE.md",
             documentation_role=documentation_directory / "ROLE.md",
+            developer_role=developer_directory / "ROLE.md",
+            reviewer_role=reviewer_directory / "ROLE.md",
             output_schema_path=output_schema_path,
+            developer_output_schema_path=developer_output_schema_path,
+            reviewer_output_schema_path=reviewer_output_schema_path,
+            requirements_challenge_output_schema_path=requirements_challenge_output_schema_path,
         )
         if once:
             return orchestrator.run_once().status
@@ -59,6 +73,18 @@ def main() -> None:
         help="Directory containing Doku ROLE.md and agent-config.yaml.",
     )
     parser.add_argument(
+        "--developer-directory",
+        type=Path,
+        default=Path("agents/developer"),
+        help="Directory containing Developer ROLE.md and agent-config.yaml.",
+    )
+    parser.add_argument(
+        "--reviewer-directory",
+        type=Path,
+        default=Path("agents/optimization-reviewer"),
+        help="Directory containing Optimization Reviewer ROLE.md and agent-config.yaml.",
+    )
+    parser.add_argument(
         "--output-schema",
         type=Path,
         default=Path("schemas/orchestrator-result.schema.json"),
@@ -69,6 +95,24 @@ def main() -> None:
         type=float,
         default=60.0,
         help="Seconds between polls (default: 60).",
+    )
+    parser.add_argument(
+        "--developer-output-schema",
+        type=Path,
+        default=Path("schemas/developer-result.schema.json"),
+        help="JSON Schema for Developer's final result.",
+    )
+    parser.add_argument(
+        "--reviewer-output-schema",
+        type=Path,
+        default=Path("schemas/optimization-review-result.schema.json"),
+        help="JSON Schema for Optimization Reviewer's final result.",
+    )
+    parser.add_argument(
+        "--requirements-challenge-output-schema",
+        type=Path,
+        default=Path("schemas/requirements-challenge-result.schema.json"),
+        help="JSON Schema for the Optimization Reviewer's issue-level challenge result.",
     )
     parser.add_argument(
         "--once",
@@ -83,7 +127,12 @@ def main() -> None:
             args.workspace,
             project_owner_directory=args.project_owner_directory,
             documentation_directory=args.documentation_directory,
+            developer_directory=args.developer_directory,
+            reviewer_directory=args.reviewer_directory,
             output_schema_path=args.output_schema,
+            developer_output_schema_path=args.developer_output_schema,
+            reviewer_output_schema_path=args.reviewer_output_schema,
+            requirements_challenge_output_schema_path=args.requirements_challenge_output_schema,
             poll_interval=args.poll_interval,
             once=args.once,
         )

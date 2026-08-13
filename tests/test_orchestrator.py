@@ -5,8 +5,14 @@ from agent_army.orchestrator import IssueOrchestrator
 from agent_army.work_items import WorkItemReader
 
 
-def result(*, next_state: str, questions: list[str] | None = None) -> dict:
-    return {
+def result(
+    *,
+    next_state: str,
+    questions: list[str] | None = None,
+    challenge_round: int | None = None,
+    scope_changed: bool | None = None,
+) -> dict:
+    value = {
         "summary": "A validated result.",
         "evidence": ["The issue and repository were reviewed."],
         "questions": questions or [],
@@ -14,6 +20,24 @@ def result(*, next_state: str, questions: list[str] | None = None) -> dict:
         "files_changed": [],
         "commands_run": ["uv run python -m unittest"],
         "next_state": next_state,
+    }
+    if challenge_round is not None:
+        value["requirements_challenge_round"] = challenge_round
+    if scope_changed is not None:
+        value["requirements_scope_changed"] = scope_changed
+    return value
+
+
+def challenge_result(round_number: int) -> dict:
+    return {
+        "outcome": "concerns-found",
+        "challenge_round": round_number,
+        "summary": "The draft needs one scope clarification before implementation.",
+        "evidence": ["Empty input behavior is not defined."],
+        "questions": ["Should empty input be rejected or treated as no-op?"],
+        "recommended_actions": ["Project Owner should record the chosen behavior."],
+        "files_changed": [],
+        "commands_run": ["uv run python -m unittest"],
     }
 
 
@@ -78,6 +102,168 @@ class IssueOrchestratorTests(unittest.TestCase):
             work_item_reader=WorkItemReader(github),
             id_factory=lambda: "test-invocation",
         )
+
+    def make_reviewer_orchestrator(
+        self, github: FakeGitHub, executor: FakeExecutor
+    ) -> IssueOrchestrator:
+        return IssueOrchestrator(
+            repository="acme/widgets",
+            project_owner_github=github,
+            documentation_github=github,
+            reviewer_github=github,
+            workspace=Path("/workspace"),
+            project_owner_role=Path("agents/project-owner/ROLE.md"),
+            documentation_role=Path("agents/documentation/ROLE.md"),
+            reviewer_role=Path("agents/optimization-reviewer/ROLE.md"),
+            output_schema_path=Path("schemas/orchestrator-result.schema.json"),
+            reviewer_output_schema_path=Path("schemas/optimization-review-result.schema.json"),
+            requirements_challenge_output_schema_path=Path(
+                "schemas/requirements-challenge-result.schema.json"
+            ),
+            executor=executor,
+            work_item_reader=WorkItemReader(github),
+            id_factory=lambda: "test-invocation",
+        )
+
+    def test_ready_for_development_routes_to_developer_when_configured(self) -> None:
+        github = FakeGitHub(["ready-for-development"])
+        orchestrator = IssueOrchestrator(
+            repository="acme/widgets",
+            project_owner_github=github,
+            documentation_github=github,
+            developer_github=github,
+            reviewer_github=github,
+            workspace=Path("/workspace"),
+            project_owner_role=Path("agents/project-owner/ROLE.md"),
+            documentation_role=Path("agents/documentation/ROLE.md"),
+            developer_role=Path("agents/developer/ROLE.md"),
+            reviewer_role=Path("agents/optimization-reviewer/ROLE.md"),
+            output_schema_path=Path("schemas/orchestrator-result.schema.json"),
+            developer_output_schema_path=Path("schemas/developer-result.schema.json"),
+            reviewer_output_schema_path=Path("schemas/optimization-review-result.schema.json"),
+            executor=FakeExecutor(),
+            work_item_reader=WorkItemReader(github),
+        )
+
+        task = orchestrator._select_task({"issue": {"labels": ["ready-for-development"], "comments": []}})
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.agent.name, "developer")
+
+    def test_needs_optimization_review_routes_to_reviewer_when_configured(self) -> None:
+        github = FakeGitHub(["needs-optimization-review"])
+        orchestrator = IssueOrchestrator(
+            repository="acme/widgets",
+            project_owner_github=github,
+            documentation_github=github,
+            developer_github=github,
+            reviewer_github=github,
+            workspace=Path("/workspace"),
+            project_owner_role=Path("agents/project-owner/ROLE.md"),
+            documentation_role=Path("agents/documentation/ROLE.md"),
+            developer_role=Path("agents/developer/ROLE.md"),
+            reviewer_role=Path("agents/optimization-reviewer/ROLE.md"),
+            output_schema_path=Path("schemas/orchestrator-result.schema.json"),
+            developer_output_schema_path=Path("schemas/developer-result.schema.json"),
+            reviewer_output_schema_path=Path("schemas/optimization-review-result.schema.json"),
+            executor=FakeExecutor(),
+            work_item_reader=WorkItemReader(github),
+        )
+
+        task = orchestrator._select_task(
+            {"issue": {"labels": ["needs-optimization-review"], "comments": []}}
+        )
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.agent.name, "optimization-reviewer")
+
+    def test_initial_requirements_challenge_uses_reviewer_and_returns_to_decision(self) -> None:
+        github = FakeGitHub(["needs-grooming"])
+        executor = FakeExecutor(
+            result(
+                next_state="needs-requirements-challenge",
+                challenge_round=1,
+                scope_changed=False,
+            ),
+            challenge_result(1),
+        )
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-requirements-challenge"])
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-decision"])
+        self.assertEqual(len(github.comments), 2)
+        self.assertIn("requirements challenge completed", github.comments[-1]["body"])
+        self.assertEqual(executor.requests[1].work_item["requirements_challenge"]["round"], 1)
+        self.assertEqual(
+            executor.requests[1].reference_paths,
+            (
+                Path(
+                    "agents/optimization-reviewer/references/"
+                    "mattpocock-skills/domain-modeling/SKILL.md"
+                ),
+                Path(
+                    "agents/optimization-reviewer/references/"
+                    "mattpocock-skills/grilling/SKILL.md"
+                ),
+            ),
+        )
+
+    def test_only_one_materially_changed_follow_up_challenge_is_allowed(self) -> None:
+        github = FakeGitHub(["needs-grooming"])
+        executor = FakeExecutor(
+            result(
+                next_state="needs-requirements-challenge",
+                challenge_round=1,
+                scope_changed=False,
+            ),
+            challenge_result(1),
+            result(
+                next_state="needs-requirements-challenge",
+                challenge_round=2,
+                scope_changed=True,
+            ),
+            challenge_result(2),
+        )
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        for _ in range(4):
+            self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-decision"])
+        self.assertEqual(len(github.comments), 4)
+        self.assertEqual(executor.calls, 4)
+
+        # A second follow-up cannot start a third challenge round.
+        github.labels = ["needs-decision"]
+        executor.results.append(
+            result(
+                next_state="needs-requirements-challenge",
+                challenge_round=2,
+                scope_changed=True,
+            )
+        )
+        self.assertEqual(orchestrator.run_once().status, "failed")
+        self.assertEqual(github.labels, ["needs-decision"])
+        self.assertEqual(len(github.comments), 4)
+
+    def test_second_challenge_state_with_durable_result_only_recovers_label(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=2 outcome=concerns-found -->"
+            }
+        ]
+        github = FakeGitHub(["needs-requirements-challenge"], comments)
+        github.fail_label_update_once = True
+        executor = FakeExecutor()
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "retrying-label-update")
+        self.assertEqual(orchestrator.run_once().status, "recovered")
+        self.assertEqual(github.labels, ["needs-decision"])
+        self.assertEqual(executor.calls, 0)
 
     def test_processes_one_unlabeled_intake_and_preserves_non_workflow_labels(self) -> None:
         github = FakeGitHub(["priority:high"])

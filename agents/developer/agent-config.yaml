@@ -1,0 +1,14 @@
+# Credential-ready configuration for the Developer agent.
+# Public identifiers for the Developer GitHub App.
+# Store only the private key in pass at private_key_secret_ref; never commit it.
+
+agent:
+  name: developer
+  role_file: ROLE.md
+  invocation_modes:
+    - issue_implementation
+
+github_app:
+  app_id: 4579193
+  client_id: Iv23liI49S3fuutyV3Nu
+  private_key_secret_ref: agent-army/developer/github-app-private-key

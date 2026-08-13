@@ -88,6 +88,8 @@ class WorkItemReader:
             "state": pull_request["state"],
             "base": pull_request["base"]["ref"],
             "head": pull_request["head"]["ref"],
+            "base_sha": pull_request["base"]["sha"],
+            "head_sha": pull_request["head"]["sha"],
             "reviews": [
                 compact_comment(review) | {"state": review.get("state")} for review in reviews
             ],

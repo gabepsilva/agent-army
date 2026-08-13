@@ -1,0 +1,15 @@
+# Credential-ready configuration for the Optimization Reviewer agent.
+# Public identifiers for the Optimization Reviewer GitHub App.
+# Store only the private key in pass at private_key_secret_ref; never commit it.
+
+agent:
+  name: optimization-reviewer
+  role_file: ROLE.md
+  invocation_modes:
+    - pull_request_review
+    - requirements_challenge
+
+github_app:
+  app_id: 4287312
+  client_id: Iv23lizPwnN2k9WRpmvp
+  private_key_secret_ref: agent-army/optimization-reviewer/github-app-private-key

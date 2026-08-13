@@ -24,12 +24,19 @@ class CodexExecutionRequest:
     reference_paths: tuple[Path, ...] = ()
 
 
-def role_reference_paths(role_path: Path) -> tuple[Path, ...]:
-    """Return only the explicitly supported reference for a role directory."""
+def role_reference_paths(
+    role_path: Path, *, invocation_mode: str | None = None
+) -> tuple[Path, ...]:
+    """Return only references explicitly supported by this role and mode."""
     domain_modeling = role_path.parent / "references/mattpocock-skills/domain-modeling/SKILL.md"
+    references: list[Path] = []
     if domain_modeling.is_file():
-        return (domain_modeling,)
-    return ()
+        references.append(domain_modeling)
+    if invocation_mode == "requirements_challenge":
+        grilling = role_path.parent / "references/mattpocock-skills/grilling/SKILL.md"
+        if grilling.is_file():
+            references.append(grilling)
+    return tuple(references)
 
 
 class CodexCliExecutor:

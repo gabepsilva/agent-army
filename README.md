@@ -62,9 +62,10 @@ uv run publish-documentation-analysis \
   --analysis doku-analysis.json
 ```
 
-This is the first GitHub write action. It accepts issue URLs only, validates the
-expected Doku result shape, and posts one issue comment. Pull-request comments
-and pull-request creation are not enabled yet.
+This is the first GitHub write action for the standalone Doku command. It
+accepts issue URLs only, validates the expected Doku result shape, and posts one
+issue comment. Pull-request creation is owned by the issue orchestrator below,
+not by this standalone command.
 
 ## Run Doku end-to-end
 
@@ -93,9 +94,19 @@ uv run run-orchestrator \
 
 Use `--once` for one polling pass. The supported labels, ownership model,
 unlabeled intake path, `orchestration-paused` guard, user-guidance pause,
-transitions, one-result-comment behavior, and retry behavior are documented in
+requirements-challenge path and round limit, Developer pull-request path,
+Optimization Reviewer check outcomes, transitions, one-result-comment behavior,
+and retry behavior are documented in
 [ORCHESTRATOR.md](ORCHESTRATOR.md). A human can add `orchestration-paused` to
 make the orchestrator ignore an issue completely until that label is removed.
+
+## Configured workflow roles
+
+The [Developer role](agents/developer/README.md) and [Optimization Reviewer
+role](agents/optimization-reviewer/README.md) are wired into the issue-to-
+pull-request path, including the issue-level requirements challenge mode.
+Branch protection and merge enforcement remain manual repository settings; the
+orchestrator does not change them.
 
 ## Session credentials
 
