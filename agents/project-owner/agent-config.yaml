@@ -1,0 +1,16 @@
+# Credential-ready configuration for the Project Owner agent.
+# Add public GitHub App identifiers after the App is created.
+# Store only the private key in pass; never commit private-key material.
+
+agent:
+  name: project-owner
+  role_file: ROLE.md
+  invocation_modes:
+    - issue_intake
+    - decision_review
+    - specialist_question_resolution
+
+github_app:
+  app_id: 4578638
+  client_id: Iv23li4AwbIV5S32dZyJ
+  private_key_secret_ref: agent-army/project-owner/github-app-private-key
