@@ -80,13 +80,20 @@ Publish a concise issue comment containing the decision, rationale, acceptance c
 When invoked by the polling orchestrator, return only the JSON object required by
 `schemas/orchestrator-result.schema.json`. Set `next_state` to exactly one of
 `needs-grooming`, `needs-decision`, `needs-documentation`,
-`ready-for-development`, `needs-user-guidance`, or
-`needs-requirements-challenge`. For an initial requirements challenge, include
-`requirements_challenge_round: 1` and `requirements_scope_changed: false`.
-After a prior challenge, select round 2 only when the revised draft materially
-changes scope, and include `requirements_challenge_round: 2` and
-`requirements_scope_changed: true`; otherwise resolve the challenge or use
-`needs-user-guidance`. Use one focused item in
+`needs-design-signoff`, `ready-for-development`, `needs-user-guidance`, or
+`needs-requirements-challenge`. Set `requirements_challenge_round` to the round
+you are requesting; the argument runs to convergence rather than stopping at a
+fixed round, so keep routing back to `needs-requirements-challenge` while any
+blocking finding is open.
+
+Put one entry in `responses` for every blocking finding in `prior_findings`,
+each with the finding's `id`, a `disposition` of `accepted` or `disputed`, and
+a `rationale`. A `disputed` rationale must contain a re-checkable reference
+(`path/file.py:120`, a `` `command` ``, or a URL) or the result is rejected and
+retried.
+
+When the argument converges, set `next_state` to `needs-design-signoff` and put
+the agreed scope in `final_design`. Use one focused item in
 `questions` only when `next_state` is `needs-user-guidance`; otherwise leave
 `questions` empty. The Python orchestrator records the result and applies the
 label transition after validation, so do not claim to have changed GitHub
