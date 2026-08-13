@@ -9,6 +9,7 @@ from agent_army.orchestrator import (
     format_dry_run_outcome,
 )
 from agent_army.github_app import DESIGN_SIGNOFF_REACTION
+from agent_army.publishers import MAX_CONVERGENCE_ROUNDS, encode_payload
 from agent_army.run_orchestrator import main as run_orchestrator_main
 from agent_army.work_items import WorkItemReader
 
@@ -303,6 +304,64 @@ class DryRunTests(unittest.TestCase):
         outcome = self.make_orchestrator(github).dry_run()
         self.assertEqual(outcome.status, "would-invoke")
         self.assertEqual(outcome.role, "optimization-reviewer")
+
+    def test_needs_optimization_review_past_round_cap_would_escalate(self) -> None:
+        # Regression for issue #16 finding F1: seven review rounds have
+        # already run without converging, each against a different commit
+        # (the Developer revised between rounds), so none of them recovers
+        # against the current head. The real next pass would post an
+        # escalation and relabel to needs-user-guidance without invoking the
+        # agent -- dry-run must report that, not "would invoke".
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=developer from=ready-for-development "
+                "next=needs-optimization-review pr=9 -->"
+            }
+        ]
+        prior_rounds = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                f"from=needs-optimization-review next=ready-for-development "
+                f"outcome=changes-requested pr=9 head=round-{index}-sha round={index} -->\n"
+                + encode_payload({"findings": [], "round": index})
+            }
+            for index in range(1, MAX_CONVERGENCE_ROUNDS + 1)
+        ]
+        github = FakeDryRunGitHub()
+        github.add_issue(1, ["needs-optimization-review"], comments=comments)
+        github.add_pull_request(9, head_sha="round-8-sha", comments=prior_rounds)
+        outcome = self.make_orchestrator(github).dry_run()
+        self.assertEqual(outcome.status, "would-escalate")
+        self.assertEqual(outcome.next_state, "needs-user-guidance")
+        self.assertEqual(
+            format_dry_run_outcome(outcome),
+            "issue #1 [needs-optimization-review] would escalate "
+            "(convergence round limit reached, no agent invoked) -> needs-user-guidance",
+        )
+
+    def test_needs_optimization_review_below_round_cap_would_invoke(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=developer from=ready-for-development "
+                "next=needs-optimization-review pr=9 -->"
+            }
+        ]
+        prior_rounds = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                f"from=needs-optimization-review next=ready-for-development "
+                f"outcome=changes-requested pr=9 head=round-{index}-sha round={index} -->\n"
+                + encode_payload({"findings": [], "round": index})
+            }
+            for index in range(1, MAX_CONVERGENCE_ROUNDS)
+        ]
+        github = FakeDryRunGitHub()
+        github.add_issue(1, ["needs-optimization-review"], comments=comments)
+        github.add_pull_request(
+            9, head_sha=f"round-{MAX_CONVERGENCE_ROUNDS}-sha", comments=prior_rounds
+        )
+        outcome = self.make_orchestrator(github).dry_run()
+        self.assertEqual(outcome.status, "would-invoke")
 
     def test_dry_run_never_calls_a_write_capable_method(self) -> None:
         github = FakeDryRunGitHub()

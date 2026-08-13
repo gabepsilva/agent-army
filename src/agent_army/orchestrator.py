@@ -101,9 +101,10 @@ class DryRunCandidate:
 class DryRunOutcome:
     """A preview of what run_once() would do next, without any side effects.
 
-    status is one of "no-open-issues", "no-eligible-issue", "would-invoke", or
-    "would-recover". The latter two describe the single selected issue; every
-    issue considered and passed over along the way is recorded in `skipped`.
+    status is one of "no-open-issues", "no-eligible-issue", "would-invoke",
+    "would-recover", or "would-escalate". The latter three describe the single
+    selected issue; every issue considered and passed over along the way is
+    recorded in `skipped`.
     """
 
     status: str
@@ -377,6 +378,15 @@ class IssueOrchestrator:
                 recovered = self._find_requirements_challenge_result(comments, pending_round)
                 if recovered is not None:
                     return "would-recover", recovered.get("next")
+                challenge_round = (
+                    pending_round or self._latest_requirements_challenge_round(comments) + 1
+                )
+                if challenge_round > MAX_CONVERGENCE_ROUNDS:
+                    # Matches _run_requirements_challenge_task's own escalation
+                    # check: past the round cap, the next pass posts an
+                    # escalation and relabels to needs-user-guidance without
+                    # ever invoking the agent.
+                    return "would-escalate", "needs-user-guidance"
                 return "would-invoke", None
             if task.invocation_mode == "design_signoff":
                 design = self._find_final_design_comment(comments)
@@ -389,11 +399,10 @@ class IssueOrchestrator:
             developer_marker = self._find_developer_marker(comments)
             if developer_marker is None:
                 return "would-invoke", None
-            pull_target = GitHubTarget(
-                self.owner, self.repository, int(developer_marker["pr"]), "pull_request"
-            )
+            pull_number = int(developer_marker["pr"])
+            pull_target = GitHubTarget(self.owner, self.repository, pull_number, "pull_request")
             pull_conversation_target = GitHubTarget(
-                self.owner, self.repository, int(developer_marker["pr"]), "issue"
+                self.owner, self.repository, pull_number, "issue"
             )
             pull_request = self._reviewer_github.get_pull_request(pull_target)
             head_sha = str(pull_request["head"]["sha"])
@@ -403,6 +412,12 @@ class IssueOrchestrator:
                 return "would-recover", recovered.get("next")
             if self._find_review_check(head_sha) is not None:
                 return "would-recover", None
+            round_number = self._review_round(pull_comments, pull_number) + 1
+            if round_number > MAX_CONVERGENCE_ROUNDS:
+                # Matches _run_reviewer_task's own escalation check: past the
+                # round cap, the next pass posts an escalation and relabels to
+                # needs-user-guidance without ever invoking the agent.
+                return "would-escalate", "needs-user-guidance"
             return "would-invoke", None
         # Project Owner and Documentation both run through _run_issue_task.
         recovered = self._find_result(comments, task)
@@ -1525,5 +1540,11 @@ def format_dry_run_outcome(outcome: DryRunOutcome) -> str:
         return (
             f"{prefix}issue #{outcome.issue_number} [{label}] would recover "
             f"(relabel only, no agent invoked) -> {next_state}"
+        )
+    if outcome.status == "would-escalate":
+        next_state = outcome.next_state or "unknown next state"
+        return (
+            f"{prefix}issue #{outcome.issue_number} [{label}] would escalate "
+            f"(convergence round limit reached, no agent invoked) -> {next_state}"
         )
     raise ValueError(f"Unknown dry-run status: {outcome.status}")

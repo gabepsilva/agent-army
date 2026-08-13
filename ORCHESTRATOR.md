@@ -30,10 +30,15 @@ read-only eligibility scan `--once` would, but stops before any write: no
 comment, no label update, no Codex invocation, and no git/worktree operation.
 It reports one of:
 
-- the lowest-numbered eligible issue, its current workflow label, and either
-  "would invoke `<agent>`" (the next pass will run the agent) or "would
-  recover (relabel only, no agent invoked) -> `<next-state>`" (a matching
-  result is already posted, so the next pass would only relabel); or
+- the lowest-numbered eligible issue, its current workflow label, and one of
+  "would invoke `<agent>`" (the next pass will run the agent), "would recover
+  (relabel only, no agent invoked) -> `<next-state>`" (a matching result is
+  already posted, so the next pass would only relabel), or "would escalate
+  (convergence round limit reached, no agent invoked) -> `<next-state>`" (the
+  PR review or requirements challenge has already run
+  `MAX_CONVERGENCE_ROUNDS` rounds without converging, so the next pass posts
+  an escalation comment and hands off to a human instead of invoking the
+  agent again); or
 - "no eligible issue", with a one-line reason for each issue skipped along
   the way (paused, ambiguous labels, blocked on human, and so on); or
 - "no open issues" if the repository has none.
