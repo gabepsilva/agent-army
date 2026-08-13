@@ -9,7 +9,8 @@ from pathlib import Path
 
 from agent_army.config import load_github_app_config
 from agent_army.convergence_report import ArgumentReport, analyze_issue, render_report
-from agent_army.credentials import SessionCredentialBroker
+from agent_army.config import load_runtime_config
+from agent_army.credentials import SessionCredentialBroker, build_secret_loader
 from agent_army.github_app import GitHubAppClient, GitHubTarget
 
 
@@ -93,7 +94,11 @@ def main() -> None:
     try:
         owner, repository = _parse_repository(args.repository)
         config = load_github_app_config(args.agent_directory / "agent-config.yaml")
-        with SessionCredentialBroker() as broker:
+        with SessionCredentialBroker(
+            build_secret_loader(
+                (_rc := load_runtime_config()).credentials_source, env_path=_rc.env_file
+            )
+        ) as broker:
             client = GitHubAppClient(config, broker)
             reports = collect_reports(client, owner, repository, limit=args.limit)
         print(render_report(reports))

@@ -17,7 +17,7 @@ from agent_army.config import (
     load_github_app_config,
     load_runtime_config,
 )
-from agent_army.credentials import SessionCredentialBroker
+from agent_army.credentials import SessionCredentialBroker, build_secret_loader
 from agent_army.github_app import GitHubAppClient
 from agent_army.orchestrator import (
     DEVELOPER,
@@ -57,7 +57,9 @@ def run(
     documentation_config = load_github_app_config(documentation_directory / "agent-config.yaml")
     developer_config = load_github_app_config(developer_directory / "agent-config.yaml")
     reviewer_config = load_github_app_config(reviewer_directory / "agent-config.yaml")
-    with SessionCredentialBroker() as broker:
+    with SessionCredentialBroker(
+        build_secret_loader(base_runtime.credentials_source, env_path=base_runtime.env_file)
+    ) as broker:
         orchestrator = IssueOrchestrator(
             repository=repository,
             project_owner_github=GitHubAppClient(owner_config, broker),

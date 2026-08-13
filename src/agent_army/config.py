@@ -8,6 +8,8 @@ from typing import Any
 
 import yaml
 
+from agent_army.credentials import SECRET_SOURCES
+
 
 @dataclass(frozen=True)
 class GitHubAppConfig:
@@ -68,6 +70,11 @@ class RuntimeConfig:
     backend: str = CODEX_BACKEND
     codex: CodexBackendConfig = CodexBackendConfig()
     claude: ClaudeBackendConfig = ClaudeBackendConfig()
+    # Where GitHub App private keys are read from. "pass" keeps them
+    # encrypted at rest but needs an interactive unlock; "env" trades that
+    # for unattended operation.
+    credentials_source: str = "pass"
+    env_file: Path = Path(".env")
 
     def with_backend(self, backend: str | None) -> "RuntimeConfig":
         """Return this configuration with a command-line backend override applied."""
@@ -127,10 +134,19 @@ def _merge_runtime(
         # An agent's `runtime:` section nests backend settings directly.
         backends = section
     backends = _mapping(backends, "'backends'", config_path)
+    credentials = _mapping(section.get("credentials") or {}, "'credentials'", config_path)
+    source = str(credentials.get("source", base.credentials_source))
+    if source not in SECRET_SOURCES:
+        raise ValueError(
+            f"Unknown credential source {source!r} in {config_path}; "
+            f"expected one of {', '.join(SECRET_SOURCES)}."
+        )
     return RuntimeConfig(
         backend=_validated_backend(section.get("backend", base.backend), config_path),
         codex=_codex_config(backends.get(CODEX_BACKEND) or {}, base.codex, config_path),
         claude=_claude_config(backends.get(CLAUDE_BACKEND) or {}, base.claude, config_path),
+        credentials_source=source,
+        env_file=Path(str(credentials.get("env_file", base.env_file))),
     )
 
 

@@ -195,6 +195,31 @@ pull-request path, including the issue-level requirements challenge mode.
 Branch protection and merge enforcement remain manual repository settings; the
 orchestrator does not change them.
 
+## Choose where credentials come from
+
+`pass` keeps the GitHub App private keys encrypted at rest, but decrypting them
+needs an interactive GPG unlock. gpg-agent's cache expires and a headless
+process has no TTY for pinentry, so an unattended orchestrator eventually
+stalls on `pass show`. Set `credentials.source` in `config.yaml` to `env` to
+read them from the environment or a dotenv file instead:
+
+```bash
+cp .env.example .env && chmod 600 .env   # then fill in the paths
+```
+
+Each key's variable name is derived from its secret ref, so nothing needs to be
+kept in sync: `agent-army/project-owner/github-app-private-key` becomes
+`AGENT_ARMY_PROJECT_OWNER_GITHUB_APP_PRIVATE_KEY`. A value may be the PEM
+itself (newlines written as `\n` are restored) or a path to the `.pem` file.
+
+Values read from the dotenv file are kept in the orchestrator's own memory and
+are never exported to `os.environ`, so they are not inherited by the agent CLI
+subprocesses, which must never receive credentials.
+
+This is a real tradeoff, not a free upgrade: `env` gives up encryption at rest,
+making the keys readable by anything running as this user. `.env` is
+gitignored; keep it that way and restrict it with `chmod 600`.
+
 ## Session credentials
 
 `SessionCredentialBroker` is the orchestrator-owned, in-memory cache for secrets.

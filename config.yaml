@@ -58,3 +58,21 @@ backends:
     # --ephemeral and sees none of it. Claude's --bare flag would suppress that,
     # but it also forces ANTHROPIC_API_KEY-only auth, which cannot work while
     # provider keys are stripped from the agent environment.
+
+# Where GitHub App private keys are read from.
+#
+#   pass  Encrypted at rest in the password store, but decrypting needs an
+#         interactive GPG unlock -- gpg-agent's cache expires, and a headless
+#         process has no TTY for pinentry, so long unattended runs stall.
+#   env   Read from the environment, falling back to the env_file below. Each
+#         key's variable name is derived from its secret ref:
+#         agent-army/project-owner/github-app-private-key becomes
+#         AGENT_ARMY_PROJECT_OWNER_GITHUB_APP_PRIVATE_KEY. The value may be the
+#         PEM itself (newlines may be written as \n) or a path to the .pem file.
+#
+# "env" trades pass's at-rest encryption for unattended operation: the key
+# becomes readable by anything running as this user. Keep the file out of
+# version control (.env is gitignored) and restrict it with chmod 600.
+credentials:
+  source: pass
+  env_file: .env

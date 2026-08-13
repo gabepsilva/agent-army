@@ -21,7 +21,7 @@ from agent_army.config import (
     load_github_app_config,
     load_runtime_config,
 )
-from agent_army.credentials import SessionCredentialBroker
+from agent_army.credentials import SessionCredentialBroker, build_secret_loader
 from agent_army.documentation_context import add_documentation_signals
 from agent_army.github_app import GitHubAppClient
 from agent_army.publishers import render_documentation_analysis
@@ -44,7 +44,11 @@ def run(
     config = load_github_app_config(agent_config_path)
     runtime = load_agent_runtime_config(agent_config_path, runtime_config or RuntimeConfig())
     role_path = agent_directory / "ROLE.md"
-    with SessionCredentialBroker() as broker:
+    with SessionCredentialBroker(
+            build_secret_loader(
+                (_rc := load_runtime_config()).credentials_source, env_path=_rc.env_file
+            )
+        ) as broker:
         github = GitHubAppClient(config, broker)
         work_item = WorkItemReader(github).read(target)
         execution = build_executor(runtime).execute(

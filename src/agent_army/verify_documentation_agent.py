@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 from agent_army.config import GitHubAppConfig, load_github_app_config
-from agent_army.credentials import SessionCredentialBroker
+from agent_army.config import load_runtime_config
+from agent_army.credentials import SessionCredentialBroker, build_secret_loader
 from agent_army.github_app import GitHubAppClient
 
 
@@ -20,7 +21,11 @@ def verify(agent_directory: Path) -> list[str]:
     if not role_path.read_text(encoding="utf-8").strip():
         raise ValueError(f"Role card is empty: {role_path}")
 
-    with SessionCredentialBroker() as broker:
+    with SessionCredentialBroker(
+            build_secret_loader(
+                (_rc := load_runtime_config()).credentials_source, env_path=_rc.env_file
+            )
+        ) as broker:
         return GitHubAppClient(load_github_app_config(config_path), broker).list_repositories()
 
 
