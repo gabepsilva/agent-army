@@ -225,6 +225,25 @@ def render_documentation_analysis(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def drop_irrelevant_challenge_metadata(result: dict[str, Any]) -> str | None:
+    """Discard a challenge round number attached to a non-challenge transition.
+
+    The round only means anything when routing to a challenge, so a stray one
+    elsewhere is noise rather than a correctness problem. Rejecting the result
+    over it costs a full agent re-run to regenerate work that was otherwise
+    fine, so drop it and report it instead. Returns a note when something was
+    dropped, so sloppy output stays visible rather than silently tolerated.
+    """
+    if result.get("next_state") == "needs-requirements-challenge":
+        return None
+    if result.pop("requirements_challenge_round", None) is None:
+        return None
+    return (
+        "Dropped a requirements_challenge_round on a "
+        f"{result.get('next_state')} transition, where it has no meaning."
+    )
+
+
 def validate_orchestration_result(
     result: dict[str, Any],
     role: str,

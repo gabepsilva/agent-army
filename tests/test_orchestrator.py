@@ -293,6 +293,69 @@ class IssueOrchestratorTests(unittest.TestCase):
         self.assertEqual(orchestrator.run_once().status, "processed")
         self.assertEqual(github.labels, ["needs-design-signoff"])
 
+    def test_a_should_fix_finding_does_not_hold_a_converged_argument_open(self) -> None:
+        # The Reviewer's verdict decides convergence, and it may declare
+        # no-material-concerns while still carrying should-fix findings it
+        # stands behind. Gating on the whole finding set sent Project Owner
+        # back for another round it could never win.
+        findings = [
+            {
+                "id": "C2",
+                "severity": "should-fix",
+                "claim": "The skip-reason taxonomy names a category that cannot occur.",
+                "evidence": ["src/agent_army/orchestrator.py:274 is the only fallthrough."],
+            }
+        ]
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=2 outcome=no-material-concerns -->\n"
+                + encode_payload({"findings": findings, "round": 2})
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        resolution = result(next_state="needs-design-signoff")
+        resolution["final_design"] = "The converged scope for this issue."
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-design-signoff"])
+
+    def test_a_stray_challenge_round_is_dropped_rather_than_wasting_a_rerun(self) -> None:
+        # The round only means anything when routing to a challenge, so a stray
+        # one elsewhere is noise, not a correctness problem. Rejecting the
+        # result over it burned a full paid agent run to regenerate work that
+        # was otherwise fine -- twice, on issues #17 and #19. It is dropped and
+        # reported instead, so the sloppiness stays visible without costing a
+        # rerun.
+        github = FakeGitHub(["needs-decision"])
+        resolution = result(next_state="needs-design-signoff", challenge_round=2)
+        resolution["final_design"] = "The converged scope for this issue."
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertIn("Dropped a requirements_challenge_round", outcome.detail or "")
+        self.assertEqual(github.labels, ["needs-design-signoff"])
+        self.assertEqual(executor.calls, 1)
+
+    def test_a_challenge_round_is_kept_when_it_belongs(self) -> None:
+        github = FakeGitHub(["needs-decision"])
+        executor = FakeExecutor(
+            result(next_state="needs-requirements-challenge", challenge_round=1)
+        )
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertIsNone(outcome.detail)
+        self.assertIn("challenge_round=1", github.comments[-1]["body"])
+
     def test_a_long_argument_stays_selectable_past_the_old_two_round_cap(self) -> None:
         # The selector used to refuse to dispatch after round 2, so an
         # argument that legitimately needed more rounds became unreachable:

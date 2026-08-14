@@ -35,6 +35,7 @@ from agent_army.publishers import (
     WORKFLOW_STATES,
     accumulate_agreements,
     decode_payload,
+    drop_irrelevant_challenge_metadata,
     render_convergence_escalation,
     render_developer_blocked_result,
     render_developer_result,
@@ -317,6 +318,11 @@ class IssueOrchestrator:
             )
             self._total_cost_usd += execution.cost_usd
             result = execution.output
+            metadata_note = (
+                drop_irrelevant_challenge_metadata(result)
+                if task.agent.name == PROJECT_OWNER
+                else None
+            )
             validate_orchestration_result(
                 result,
                 task.agent.name,
@@ -377,7 +383,9 @@ class IssueOrchestrator:
             return OrchestrationOutcome(
                 "retrying-label-update", target.number, task.agent.name, str(error)
             )
-        return OrchestrationOutcome("processed", target.number, task.agent.name)
+        return OrchestrationOutcome(
+            "processed", target.number, task.agent.name, metadata_note
+        )
 
     def _run_requirements_challenge_task(
         self, target: GitHubTarget, work_item: dict[str, Any], task: _Task
@@ -1120,13 +1128,18 @@ class IssueOrchestrator:
         The proposer must not be the one who decides its own proposal has
         converged -- it has every incentive to declare victory, which is why
         an argument that should have run several rounds ended in one. While a
-        challenge finding is still open, Project Owner's resolution goes back
-        for another round no matter which state it asked for. Only a Reviewer
-        verdict of no-material-concerns clears the way to sign-off.
+        blocking challenge finding is still open, Project Owner's resolution
+        goes back for another round no matter which state it asked for.
+
+        Only blocking findings hold the argument open. A Reviewer may declare
+        no-material-concerns while still carrying should-fix findings it stands
+        behind; gating on the whole finding set treated that verdict as an
+        unresolved argument and bounced Project Owner back forever, until the
+        round cap escalated a converged design to a human.
         """
         if next_state not in {"needs-design-signoff", "ready-for-development"}:
             return next_state
-        if not self._open_challenge_findings(comments):
+        if not self._blocking_challenge_findings(comments):
             return next_state
         # The orchestrator is imposing this round, not Project Owner, so it
         # supplies the round number the marker records.
@@ -1139,10 +1152,25 @@ class IssueOrchestrator:
         result.pop("final_design", None)
         return "needs-requirements-challenge"
 
+    def _blocking_challenge_findings(
+        self, comments: Iterable[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """The challenge findings that still hold the argument open."""
+        return [
+            finding
+            for finding in self._open_challenge_findings(comments)
+            if finding.get("severity") == BLOCKING
+        ]
+
     def _open_challenge_findings(
         self, comments: Iterable[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """The challenge findings Project Owner must currently answer for."""
+        """The challenge findings Project Owner must currently answer for.
+
+        The full graded set, not just the blocking ones: Project Owner may
+        respond to any of them, and the response contract decides for itself
+        which ones it requires an answer to.
+        """
         for comment in reversed(list(comments)):
             body = str(comment.get("body") or "")
             if "mode=requirements_challenge" not in body:

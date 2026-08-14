@@ -81,10 +81,12 @@ When invoked by the polling orchestrator, return only the JSON object required b
 `schemas/orchestrator-result.schema.json`. Set `next_state` to exactly one of
 `needs-grooming`, `needs-decision`, `needs-documentation`,
 `needs-design-signoff`, `ready-for-development`, `needs-user-guidance`, or
-`needs-requirements-challenge`. Set `requirements_challenge_round` to the round
-you are requesting; the argument runs to convergence rather than stopping at a
-fixed round, so keep routing back to `needs-requirements-challenge` while any
-blocking finding is open.
+`needs-requirements-challenge`. Include `requirements_challenge_round` only
+when `next_state` is `needs-requirements-challenge`, set to the round you are
+requesting; omit the field entirely for every other `next_state`, or the result
+is rejected and retried. The argument runs to convergence rather than stopping
+at a fixed round, so keep routing back to `needs-requirements-challenge` while
+any blocking finding is open.
 
 Put one entry in `responses` for every blocking finding in `prior_findings`,
 each with the finding's `id`, a `disposition` of `accepted` or `disputed`, and
