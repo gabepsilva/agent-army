@@ -23,5 +23,7 @@ runtime:
     reasoning_effort: medium
   claude:
     permission_mode: bypassPermissions
-    model: claude-sonnet-5
-    effort: medium
+    model: claude-haiku-4-5-20251001
+    # `claude --effort` accepts low|medium|high|xhigh|max -- there is no "none",
+    # so thinking cannot be disabled outright. low is the floor.
+    effort: low

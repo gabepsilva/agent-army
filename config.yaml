@@ -47,11 +47,11 @@ backends:
     permission_mode: bypassPermissions
 
     # Pin a model, or leave empty to use the Claude Code default.
-    model: claude-sonnet-5
+    model: claude-haiku-4-5-20251001
 
     # Reasoning effort: low, medium, high, xhigh, or max. Leave empty to use
     # the Claude Code default.
-    effort: medium
+    effort: low
 
     # Known asymmetry, accepted: Claude Code loads CLAUDE.md, user settings,
     # hooks, and skills from the workspace and ~/.claude, while Codex runs with
