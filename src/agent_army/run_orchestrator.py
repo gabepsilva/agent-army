@@ -25,7 +25,20 @@ from agent_army.orchestrator import (
     OPTIMIZATION_REVIEWER,
     PROJECT_OWNER,
     IssueOrchestrator,
+    OrchestrationOutcome,
 )
+
+
+def _format_dry_run_output(outcome: OrchestrationOutcome) -> str:
+    """Format dry-run outcome as tab-separated output."""
+    if outcome.status == "eligible":
+        return f"ELIGIBLE\t{outcome.issue_number}\t{outcome.role}\t{outcome.detail}"
+    elif outcome.status == "ineligible":
+        reason = outcome.detail or "unknown"
+        return f"INELIGIBLE\t{reason}\t"
+    else:
+        error_code = outcome.detail or "other-error"
+        return f"ERROR\t{error_code}\t{outcome.role or ''}"
 
 
 def run(
@@ -43,6 +56,7 @@ def run(
     design_signoff_output_schema_path: Path,
     poll_interval: float = 60.0,
     once: bool = False,
+    dry_run: bool = False,
     runtime_config: RuntimeConfig | None = None,
 ) -> str:
     """Start the configured polling service and return a one-shot status."""
@@ -83,6 +97,9 @@ def run(
                 for role, directory in agent_directories.items()
             },
         )
+        if dry_run:
+            outcome = orchestrator.dry_run_once()
+            return _format_dry_run_output(outcome)
         if once:
             status = orchestrator.run_once().status
             return f"{status} (reported cost ${orchestrator.total_cost_usd:.4f})"
@@ -171,7 +188,19 @@ def main() -> None:
         action="store_true",
         help="Process at most one eligible issue and exit.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview what the next polling pass would select without making any changes. Requires --once.",
+    )
     args = parser.parse_args()
+
+    if args.dry_run and not args.once:
+        print("error: --dry-run requires --once flag", file=sys.stderr)
+        raise SystemExit(2)
+    if args.dry_run and args.poll_interval != 60.0:
+        print("error: --dry-run is incompatible with --poll-interval", file=sys.stderr)
+        raise SystemExit(2)
 
     try:
         status = run(
@@ -188,12 +217,26 @@ def main() -> None:
             design_signoff_output_schema_path=args.design_signoff_output_schema,
             poll_interval=args.poll_interval,
             once=args.once,
+            dry_run=args.dry_run,
             runtime_config=load_runtime_config(args.config).with_backend(args.backend),
         )
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Agent Army orchestrator failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
-    if args.once:
+
+    if args.dry_run:
+        print(status)
+        if status.startswith("ELIGIBLE"):
+            raise SystemExit(0)
+        elif status.startswith("INELIGIBLE"):
+            raise SystemExit(1)
+        elif status.startswith("ERROR"):
+            parts = status.split("\t")
+            if len(parts) >= 2 and parts[1] == "github-api-error":
+                raise SystemExit(3)
+            else:
+                raise SystemExit(4)
+    elif args.once:
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
         print(f"[{timestamp}] Agent Army one-shot poll: {status}")
 

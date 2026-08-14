@@ -200,6 +200,30 @@ class IssueOrchestrator:
             return self._run_task(target, work_item, task)
         return OrchestrationOutcome("idle")
 
+    def dry_run_once(self) -> OrchestrationOutcome:
+        """Preview the next eligible issue without making any changes."""
+        try:
+            issues = self._project_owner_github.list_open_issues(self.owner, self.repository)
+        except Exception as error:
+            return OrchestrationOutcome("error", detail="github-api-error", role=str(error))
+        try:
+            for issue in sorted(issues, key=lambda item: int(item["number"])):
+                target = GitHubTarget(self.owner, self.repository, int(issue["number"]), "issue")
+                work_item = self._reader.read(target)
+                task_or_reason = self._select_task_with_reason(work_item)
+                if isinstance(task_or_reason, _Task):
+                    return OrchestrationOutcome(
+                        "eligible",
+                        issue_number=int(issue["number"]),
+                        role=task_or_reason.agent.name,
+                        detail=task_or_reason.source_state,
+                    )
+                if task_or_reason is not None:
+                    return task_or_reason
+        except Exception as error:
+            return OrchestrationOutcome("error", detail="github-api-error", role=str(error))
+        return OrchestrationOutcome("ineligible", detail="no-eligible-issues")
+
     def run_forever(
         self,
         poll_interval: float,
@@ -218,60 +242,73 @@ class IssueOrchestrator:
                 reporter(f"Agent Army polling failed; retrying: {error}")
             sleeper(poll_interval)
 
-    def _select_task(self, work_item: dict[str, Any]) -> _Task | None:
+    def _select_task_with_reason(
+        self, work_item: dict[str, Any]
+    ) -> _Task | OrchestrationOutcome | None:
+        """Select a task or report the ineligibility reason.
+
+        Returns:
+          - _Task if eligible
+          - OrchestrationOutcome with "ineligible" status if not eligible
+          - None if no issues remain to check
+        """
         issue = work_item["issue"]
         labels = [str(label) for label in issue.get("labels", [])]
         if ORCHESTRATION_PAUSED_LABEL in labels:
-            # This human-controlled guard wins over intake and every workflow state.
-            return None
+            return OrchestrationOutcome("ineligible", detail="orchestration-paused")
         workflow_labels = [label for label in labels if label in WORKFLOW_STATES]
         comments = issue.get("comments", [])
 
         if len(workflow_labels) > 1:
-            # Ambiguous state is left untouched until a human restores the invariant.
-            return None
+            return OrchestrationOutcome("ineligible", detail="ambiguous-labels")
         if not workflow_labels:
             if self._has_completed_intake(comments):
-                return None
+                return OrchestrationOutcome("ineligible", detail="completed-intake")
             return _Task(self._agents[PROJECT_OWNER], SOURCE_UNLABELED)
 
         current_state = workflow_labels[0]
         if current_state == "needs-user-guidance":
-            return None
+            return OrchestrationOutcome("ineligible", detail="non-actionable-state")
         if current_state == "ready-for-merge":
             if OPTIMIZATION_REVIEWER in self._agents and self._needs_fresh_review(work_item):
                 return _Task(self._agents[OPTIMIZATION_REVIEWER], "needs-optimization-review")
-            return None
+            return OrchestrationOutcome("ineligible", detail="ready-for-merge-not-reviewed")
         if current_state == "needs-grooming":
             return _Task(self._agents[PROJECT_OWNER], current_state)
         if current_state == "needs-decision":
             return _Task(self._agents[PROJECT_OWNER], current_state)
         if current_state == "needs-documentation":
             return _Task(self._agents[DOCUMENTATION], current_state)
-        if (
-            current_state == "needs-requirements-challenge"
-            and OPTIMIZATION_REVIEWER in self._agents
-        ):
-            pending_round = self._latest_project_owner_challenge_round(comments)
-            challenge_task = _Task(
-                self._agents[OPTIMIZATION_REVIEWER],
-                current_state,
-                "requirements_challenge",
-            )
-            # The round bound lives in _run_requirements_challenge_task, which
-            # escalates to a human past MAX_CONVERGENCE_ROUNDS. A second cap
-            # here silently made the issue unselectable instead -- the argument
-            # stalled at round 2 with no comment, no label change, and no way
-            # to make progress.
-            return challenge_task
-        if current_state == "needs-design-signoff" and OPTIMIZATION_REVIEWER in self._agents:
-            return _Task(
-                self._agents[OPTIMIZATION_REVIEWER], current_state, "design_signoff"
-            )
-        if current_state == "ready-for-development" and DEVELOPER in self._agents:
-            return _Task(self._agents[DEVELOPER], current_state)
-        if current_state == "needs-optimization-review" and OPTIMIZATION_REVIEWER in self._agents:
-            return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state)
+        if current_state == "needs-requirements-challenge":
+            if OPTIMIZATION_REVIEWER in self._agents:
+                pending_round = self._latest_project_owner_challenge_round(comments)
+                challenge_task = _Task(
+                    self._agents[OPTIMIZATION_REVIEWER],
+                    current_state,
+                    "requirements_challenge",
+                )
+                return challenge_task
+            return OrchestrationOutcome("ineligible", detail="requirements-challenge-no-reviewer")
+        if current_state == "needs-design-signoff":
+            if OPTIMIZATION_REVIEWER in self._agents:
+                return _Task(
+                    self._agents[OPTIMIZATION_REVIEWER], current_state, "design_signoff"
+                )
+            return OrchestrationOutcome("ineligible", detail="design-signoff-no-reviewer")
+        if current_state == "ready-for-development":
+            if DEVELOPER in self._agents:
+                return _Task(self._agents[DEVELOPER], current_state)
+            return OrchestrationOutcome("ineligible", detail="ready-for-development-no-developer")
+        if current_state == "needs-optimization-review":
+            if OPTIMIZATION_REVIEWER in self._agents:
+                return _Task(self._agents[OPTIMIZATION_REVIEWER], current_state)
+            return OrchestrationOutcome("ineligible", detail="optimization-review-no-reviewer")
+        return OrchestrationOutcome("ineligible", detail="unknown-state")
+
+    def _select_task(self, work_item: dict[str, Any]) -> _Task | None:
+        result = self._select_task_with_reason(work_item)
+        if isinstance(result, _Task):
+            return result
         return None
 
     def _run_task(
