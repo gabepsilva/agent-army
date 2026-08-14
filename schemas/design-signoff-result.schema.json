@@ -1,18 +1,19 @@
 {
   "type": "object",
   "properties": {
-    "status": { "type": "string", "enum": ["completed", "blocked"] },
+    "outcome": { "type": "string", "enum": ["accepted", "correction"] },
     "summary": { "type": "string" },
-    "responses": {
+    "findings": {
       "type": "array",
       "items": {
         "type": "object",
         "properties": {
-          "finding_id": { "type": "string", "minLength": 1 },
-          "disposition": { "type": "string", "enum": ["accepted", "disputed"] },
-          "rationale": { "type": "string" }
+          "id": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "enum": ["blocking", "should-fix", "nit"] },
+          "claim": { "type": "string" },
+          "evidence": { "type": "array", "items": { "type": "string" } }
         },
-        "required": ["finding_id", "disposition", "rationale"],
+        "required": ["id", "severity", "claim", "evidence"],
         "additionalProperties": false
       }
     },
@@ -23,9 +24,9 @@
     "commands_run": { "type": "array", "items": { "type": "string" } }
   },
   "required": [
-    "status",
+    "outcome",
     "summary",
-    "responses",
+    "findings",
     "evidence",
     "questions",
     "recommended_actions",

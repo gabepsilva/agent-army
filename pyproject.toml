@@ -20,6 +20,7 @@ execute-agent = "agent_army.execute_agent:main"
 publish-documentation-analysis = "agent_army.publish_documentation_analysis:main"
 run-documentation-agent = "agent_army.run_documentation_agent:main"
 run-orchestrator = "agent_army.run_orchestrator:main"
+agent-army-report = "agent_army.run_convergence_report:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

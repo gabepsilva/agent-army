@@ -1,27 +1,39 @@
 {
   "type": "object",
   "properties": {
-    "summary": { "type": "string" },
+    "summary": {
+      "type": "string"
+    },
     "evidence": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "questions": {
       "type": "array",
-      "items": { "type": "string" },
+      "items": {
+        "type": "string"
+      },
       "maxItems": 1
     },
     "recommended_actions": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "files_changed": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "commands_run": {
       "type": "array",
-      "items": { "type": "string" }
+      "items": {
+        "type": "string"
+      }
     },
     "next_state": {
       "type": "string",
@@ -31,15 +43,44 @@
         "needs-documentation",
         "ready-for-development",
         "needs-user-guidance",
-        "needs-requirements-challenge"
+        "needs-requirements-challenge",
+        "needs-design-signoff"
       ]
     },
     "requirements_challenge_round": {
       "type": "integer",
-      "enum": [1, 2]
+      "minimum": 1
     },
-    "requirements_scope_changed": {
-      "type": "boolean"
+    "responses": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "finding_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "disposition": {
+            "type": "string",
+            "enum": [
+              "accepted",
+              "disputed"
+            ]
+          },
+          "rationale": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "finding_id",
+          "disposition",
+          "rationale"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "final_design": {
+      "type": "string"
     }
   },
   "required": [

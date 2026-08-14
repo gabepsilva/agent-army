@@ -5,12 +5,27 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_army.config import load_github_app_config
-from agent_army.credentials import SessionCredentialBroker
+from agent_army.agent_executor import build_executor
+from agent_army.config import (
+    BACKENDS,
+    DEFAULT_CONFIG_PATH,
+    RuntimeConfig,
+    load_agent_runtime_config,
+    load_github_app_config,
+    load_runtime_config,
+)
+from agent_army.credentials import SessionCredentialBroker, build_secret_loader
 from agent_army.github_app import GitHubAppClient
-from agent_army.orchestrator import IssueOrchestrator
+from agent_army.orchestrator import (
+    DEVELOPER,
+    DOCUMENTATION,
+    OPTIMIZATION_REVIEWER,
+    PROJECT_OWNER,
+    IssueOrchestrator,
+)
 
 
 def run(
@@ -25,15 +40,26 @@ def run(
     developer_output_schema_path: Path,
     reviewer_output_schema_path: Path,
     requirements_challenge_output_schema_path: Path,
+    design_signoff_output_schema_path: Path,
     poll_interval: float = 60.0,
     once: bool = False,
+    runtime_config: RuntimeConfig | None = None,
 ) -> str:
     """Start the configured polling service and return a one-shot status."""
+    base_runtime = runtime_config or RuntimeConfig()
+    agent_directories = {
+        PROJECT_OWNER: project_owner_directory,
+        DOCUMENTATION: documentation_directory,
+        DEVELOPER: developer_directory,
+        OPTIMIZATION_REVIEWER: reviewer_directory,
+    }
     owner_config = load_github_app_config(project_owner_directory / "agent-config.yaml")
     documentation_config = load_github_app_config(documentation_directory / "agent-config.yaml")
     developer_config = load_github_app_config(developer_directory / "agent-config.yaml")
     reviewer_config = load_github_app_config(reviewer_directory / "agent-config.yaml")
-    with SessionCredentialBroker() as broker:
+    with SessionCredentialBroker(
+        build_secret_loader(base_runtime.credentials_source, env_path=base_runtime.env_file)
+    ) as broker:
         orchestrator = IssueOrchestrator(
             repository=repository,
             project_owner_github=GitHubAppClient(owner_config, broker),
@@ -49,9 +75,17 @@ def run(
             developer_output_schema_path=developer_output_schema_path,
             reviewer_output_schema_path=reviewer_output_schema_path,
             requirements_challenge_output_schema_path=requirements_challenge_output_schema_path,
+            design_signoff_output_schema_path=design_signoff_output_schema_path,
+            executors={
+                role: build_executor(
+                    load_agent_runtime_config(directory / "agent-config.yaml", base_runtime)
+                )
+                for role, directory in agent_directories.items()
+            },
         )
         if once:
-            return orchestrator.run_once().status
+            status = orchestrator.run_once().status
+            return f"{status} (reported cost ${orchestrator.total_cost_usd:.4f})"
         orchestrator.run_forever(poll_interval)
     return "stopped"
 
@@ -59,7 +93,7 @@ def run(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Poll GitHub and orchestrate Agent Army roles.")
     parser.add_argument("--repository", required=True, help="GitHub repository in OWNER/REPOSITORY form.")
-    parser.add_argument("--workspace", type=Path, required=True, help="Git repository workspace for Codex.")
+    parser.add_argument("--workspace", type=Path, required=True, help="Git repository workspace for the agent.")
     parser.add_argument(
         "--project-owner-directory",
         type=Path,
@@ -115,6 +149,24 @@ def main() -> None:
         help="JSON Schema for the Optimization Reviewer's issue-level challenge result.",
     )
     parser.add_argument(
+        "--design-signoff-output-schema",
+        type=Path,
+        default=Path("schemas/design-signoff-result.schema.json"),
+        help="JSON Schema for the Optimization Reviewer's Final Design sign-off verdict.",
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Runtime configuration file (default: config.yaml).",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKENDS,
+        default=None,
+        help="Override the backend selected by the configuration file.",
+    )
+    parser.add_argument(
         "--once",
         action="store_true",
         help="Process at most one eligible issue and exit.",
@@ -133,14 +185,17 @@ def main() -> None:
             developer_output_schema_path=args.developer_output_schema,
             reviewer_output_schema_path=args.reviewer_output_schema,
             requirements_challenge_output_schema_path=args.requirements_challenge_output_schema,
+            design_signoff_output_schema_path=args.design_signoff_output_schema,
             poll_interval=args.poll_interval,
             once=args.once,
+            runtime_config=load_runtime_config(args.config).with_backend(args.backend),
         )
     except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"Agent Army orchestrator failed: {error}", file=sys.stderr)
         raise SystemExit(1) from error
     if args.once:
-        print(f"Agent Army one-shot poll: {status}")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        print(f"[{timestamp}] Agent Army one-shot poll: {status}")
 
 
 if __name__ == "__main__":

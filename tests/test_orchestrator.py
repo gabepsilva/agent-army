@@ -1,7 +1,9 @@
 import unittest
 from pathlib import Path
 
+from agent_army.agent_executor import AgentExecutionResult
 from agent_army.orchestrator import IssueOrchestrator
+from agent_army.publishers import MAX_CONVERGENCE_ROUNDS, encode_payload
 from agent_army.work_items import WorkItemReader
 
 
@@ -10,7 +12,6 @@ def result(
     next_state: str,
     questions: list[str] | None = None,
     challenge_round: int | None = None,
-    scope_changed: bool | None = None,
 ) -> dict:
     value = {
         "summary": "A validated result.",
@@ -23,8 +24,6 @@ def result(
     }
     if challenge_round is not None:
         value["requirements_challenge_round"] = challenge_round
-    if scope_changed is not None:
-        value["requirements_scope_changed"] = scope_changed
     return value
 
 
@@ -33,6 +32,16 @@ def challenge_result(round_number: int) -> dict:
         "outcome": "concerns-found",
         "challenge_round": round_number,
         "summary": "The draft needs one scope clarification before implementation.",
+        "findings": [
+            {
+                "id": "C1",
+                "severity": "blocking",
+                "claim": "Empty input behavior is not defined anywhere in the draft.",
+                "evidence": ["src/agent_army/orchestrator.py:212 selects on state alone."],
+            }
+        ],
+        "dispute_responses": [],
+        "agreements": [],
         "evidence": ["Empty input behavior is not defined."],
         "questions": ["Should empty input be rejected or treated as no-op?"],
         "recommended_actions": ["Project Owner should record the chosen behavior."],
@@ -82,10 +91,12 @@ class FakeExecutor:
         self.calls = 0
         self.requests = []
 
-    def execute(self, request) -> dict:
+    def execute(self, request) -> AgentExecutionResult:
         self.calls += 1
         self.requests.append(request)
-        return self.results.pop(0)
+        return AgentExecutionResult(
+            output=self.results.pop(0), backend="codex", cost_usd=0.0
+        )
 
 
 class IssueOrchestratorTests(unittest.TestCase):
@@ -183,7 +194,6 @@ class IssueOrchestratorTests(unittest.TestCase):
             result(
                 next_state="needs-requirements-challenge",
                 challenge_round=1,
-                scope_changed=False,
             ),
             challenge_result(1),
         )
@@ -194,7 +204,8 @@ class IssueOrchestratorTests(unittest.TestCase):
         self.assertEqual(orchestrator.run_once().status, "processed")
         self.assertEqual(github.labels, ["needs-decision"])
         self.assertEqual(len(github.comments), 2)
-        self.assertIn("requirements challenge completed", github.comments[-1]["body"])
+        self.assertIn("requirements challenge — round 1", github.comments[-1]["body"])
+        self.assertIn("1 blocking", github.comments[-1]["body"])
         self.assertEqual(executor.requests[1].work_item["requirements_challenge"]["round"], 1)
         self.assertEqual(
             executor.requests[1].reference_paths,
@@ -210,42 +221,196 @@ class IssueOrchestratorTests(unittest.TestCase):
             ),
         )
 
-    def test_only_one_materially_changed_follow_up_challenge_is_allowed(self) -> None:
-        github = FakeGitHub(["needs-grooming"])
+    def test_project_owner_cannot_ignore_a_blocking_challenge_finding(self) -> None:
+        # The proposer must take a position on every blocking finding. A
+        # resolution that silently omits one is rejected and retried rather
+        # than published, which is what let issue #15 converge in one round.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=1 outcome=concerns-found -->\n"
+                + encode_payload(
+                    {"findings": challenge_result(1)["findings"], "round": 1}
+                )
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        executor = FakeExecutor(result(next_state="needs-design-signoff"))
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "failed")
+        self.assertIn("C1", outcome.detail or "")
+        self.assertEqual(github.labels, ["needs-decision"])
+
+    def test_an_open_finding_sends_the_resolution_back_for_another_round(self) -> None:
+        # Convergence is the Reviewer's call, not the proposer's: while a
+        # finding is open, a bid for sign-off is redirected to another
+        # challenge round no matter what state Project Owner asked for.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=1 outcome=concerns-found -->\n"
+                + encode_payload(
+                    {"findings": challenge_result(1)["findings"], "round": 1}
+                )
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        resolution = result(next_state="needs-design-signoff")
+        resolution["final_design"] = "The converged scope for this issue."
+        resolution["responses"] = [
+            {
+                "finding_id": "C1",
+                "disposition": "accepted",
+                "rationale": "Defined empty-input behavior in the draft.",
+            }
+        ]
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-requirements-challenge"])
+
+    def test_sign_off_is_reachable_once_no_finding_is_open(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=2 outcome=no-material-concerns -->\n"
+                + encode_payload({"findings": [], "round": 2})
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        resolution = result(next_state="needs-design-signoff")
+        resolution["final_design"] = "The converged scope for this issue."
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-design-signoff"])
+
+    def test_a_should_fix_finding_does_not_hold_a_converged_argument_open(self) -> None:
+        # The Reviewer's verdict decides convergence, and it may declare
+        # no-material-concerns while still carrying should-fix findings it
+        # stands behind. Gating on the whole finding set sent Project Owner
+        # back for another round it could never win.
+        findings = [
+            {
+                "id": "C2",
+                "severity": "should-fix",
+                "claim": "The skip-reason taxonomy names a category that cannot occur.",
+                "evidence": ["src/agent_army/orchestrator.py:274 is the only fallthrough."],
+            }
+        ]
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                "next=needs-decision round=2 outcome=no-material-concerns -->\n"
+                + encode_payload({"findings": findings, "round": 2})
+            }
+        ]
+        github = FakeGitHub(["needs-decision"], comments)
+        resolution = result(next_state="needs-design-signoff")
+        resolution["final_design"] = "The converged scope for this issue."
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        self.assertEqual(orchestrator.run_once().status, "processed")
+        self.assertEqual(github.labels, ["needs-design-signoff"])
+
+    def test_a_stray_challenge_round_is_dropped_rather_than_wasting_a_rerun(self) -> None:
+        # The round only means anything when routing to a challenge, so a stray
+        # one elsewhere is noise, not a correctness problem. Rejecting the
+        # result over it burned a full paid agent run to regenerate work that
+        # was otherwise fine -- twice, on issues #17 and #19. It is dropped and
+        # reported instead, so the sloppiness stays visible without costing a
+        # rerun.
+        github = FakeGitHub(["needs-decision"])
+        resolution = result(next_state="needs-design-signoff", challenge_round=2)
+        resolution["final_design"] = "The converged scope for this issue."
+        executor = FakeExecutor(resolution)
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "processed")
+        self.assertIn("Dropped a requirements_challenge_round", outcome.detail or "")
+        self.assertEqual(github.labels, ["needs-design-signoff"])
+        self.assertEqual(executor.calls, 1)
+
+    def test_a_challenge_round_is_kept_when_it_belongs(self) -> None:
+        github = FakeGitHub(["needs-decision"])
         executor = FakeExecutor(
-            result(
-                next_state="needs-requirements-challenge",
-                challenge_round=1,
-                scope_changed=False,
-            ),
-            challenge_result(1),
-            result(
-                next_state="needs-requirements-challenge",
-                challenge_round=2,
-                scope_changed=True,
-            ),
-            challenge_result(2),
+            result(next_state="needs-requirements-challenge", challenge_round=1)
         )
         orchestrator = self.make_reviewer_orchestrator(github, executor)
 
-        for _ in range(4):
-            self.assertEqual(orchestrator.run_once().status, "processed")
-        self.assertEqual(github.labels, ["needs-decision"])
-        self.assertEqual(len(github.comments), 4)
-        self.assertEqual(executor.calls, 4)
+        outcome = orchestrator.run_once()
 
-        # A second follow-up cannot start a third challenge round.
-        github.labels = ["needs-decision"]
-        executor.results.append(
-            result(
-                next_state="needs-requirements-challenge",
-                challenge_round=2,
-                scope_changed=True,
-            )
+        self.assertEqual(outcome.status, "processed")
+        self.assertIsNone(outcome.detail)
+        self.assertIn("challenge_round=1", github.comments[-1]["body"])
+
+    def test_a_long_argument_stays_selectable_past_the_old_two_round_cap(self) -> None:
+        # The selector used to refuse to dispatch after round 2, so an
+        # argument that legitimately needed more rounds became unreachable:
+        # "no eligible issue" forever, with no comment and no label change to
+        # explain it. The round bound belongs to the task runner, which
+        # escalates to a human.
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                f"next=needs-decision round={index} outcome=concerns-found -->"
+            }
+            for index in (1, 2)
+        ]
+        comments.append(
+            {
+                "body": "<!-- agent-army:result role=project-owner from=needs-decision "
+                "next=needs-requirements-challenge challenge_round=3 -->"
+            }
         )
-        self.assertEqual(orchestrator.run_once().status, "failed")
-        self.assertEqual(github.labels, ["needs-decision"])
-        self.assertEqual(len(github.comments), 4)
+        github = FakeGitHub(["needs-requirements-challenge"], comments)
+        orchestrator = self.make_reviewer_orchestrator(github, FakeExecutor())
+
+        task = orchestrator._select_task(
+            {"issue": {"labels": ["needs-requirements-challenge"], "comments": comments}}
+        )
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task.invocation_mode, "requirements_challenge")
+
+    def test_an_unconverged_argument_escalates_rather_than_stalling(self) -> None:
+        comments = [
+            {
+                "body": "<!-- agent-army:result role=optimization-reviewer "
+                "mode=requirements_challenge from=needs-requirements-challenge "
+                f"next=needs-decision round={index} outcome=concerns-found -->"
+            }
+            for index in range(1, MAX_CONVERGENCE_ROUNDS + 1)
+        ]
+        # Project Owner asked for one more round than the bound allows.
+        comments.append(
+            {
+                "body": "<!-- agent-army:result role=project-owner from=needs-decision "
+                f"next=needs-requirements-challenge challenge_round={MAX_CONVERGENCE_ROUNDS + 1} -->"
+            }
+        )
+        github = FakeGitHub(["needs-requirements-challenge"], comments)
+        executor = FakeExecutor()
+        orchestrator = self.make_reviewer_orchestrator(github, executor)
+
+        outcome = orchestrator.run_once()
+
+        self.assertEqual(outcome.status, "escalated")
+        self.assertEqual(github.labels, ["needs-user-guidance"])
+        self.assertEqual(executor.calls, 0)
 
     def test_second_challenge_state_with_durable_result_only_recovers_label(self) -> None:
         comments = [

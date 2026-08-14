@@ -17,6 +17,9 @@ from agent_army.credentials import SessionCredentialBroker
 
 
 GITHUB_API_URL = "https://api.github.com"
+# GitHub accepts only these eight; an arbitrary emoji is not a reaction.
+REACTIONS = {"+1", "-1", "laugh", "confused", "heart", "hooray", "rocket", "eyes"}
+DESIGN_SIGNOFF_REACTION = "+1"
 USER_AGENT = "agent-army"
 
 
@@ -65,6 +68,45 @@ class GitHubAppClient:
             raise ValueError("Issue comments can only be posted to issue targets.")
         return self._request(
             "POST", f"{self._issue_path(target)}/comments", self._token(), {"body": body}
+        )
+
+    def update_issue_comment(
+        self, owner: str, repository: str, comment_id: int, body: str
+    ) -> dict[str, Any]:
+        """Revise a comment in place.
+
+        The Final Design write-up is a single canonical artifact, so a
+        correction edits it rather than appending another version a reader has
+        to reconcile against the first.
+        """
+        return self._request(
+            "PATCH",
+            f"/repos/{owner}/{repository}/issues/comments/{comment_id}",
+            self._token(),
+            {"body": body},
+        )
+
+    def create_reaction(
+        self, owner: str, repository: str, comment_id: int, content: str
+    ) -> dict[str, Any]:
+        """Stamp a comment. GitHub allows only its fixed reaction vocabulary."""
+        if content not in REACTIONS:
+            raise ValueError(f"Unsupported reaction: {content}")
+        return self._request(
+            "POST",
+            f"/repos/{owner}/{repository}/issues/comments/{comment_id}/reactions",
+            self._token(),
+            {"content": content},
+        )
+
+    def list_reactions(
+        self, owner: str, repository: str, comment_id: int
+    ) -> list[dict[str, Any]]:
+        """Read a comment's stamps, so a sign-off can be polled for."""
+        return self._request(
+            "GET",
+            f"/repos/{owner}/{repository}/issues/comments/{comment_id}/reactions?per_page=100",
+            self._token(),
         )
 
     def update_issue_labels(self, target: GitHubTarget, labels: list[str]) -> dict[str, Any]:
@@ -133,6 +175,14 @@ class GitHubAppClient:
             body["details_url"] = details_url
         return self._request(
             "POST", f"/repos/{owner}/{repository}/check-runs", self._token(), body
+        )
+
+    def compare_commits(self, owner: str, repository: str, base: str, head: str) -> dict[str, Any]:
+        """Compare two commits, for measuring how large a revision actually was."""
+        return self._request(
+            "GET",
+            f"/repos/{owner}/{repository}/compare/{quote(base)}...{quote(head)}",
+            self._token(),
         )
 
     def get_check_runs(self, owner: str, repository: str, head_sha: str) -> list[dict[str, Any]]:
